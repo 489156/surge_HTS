@@ -1,0 +1,79 @@
+{
+  "title": "surge — trading platform",
+  "uid": "surge-main",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Equity",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "color": { "mode": "thresholds" },
+        "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 100000 } ] } } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "surge_equity", "legendFormat": "{{mode}}" } ]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Kill switch",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "mappings": [
+        { "type": "value", "options": { "0": { "text": "ARMED", "color": "green" },
+          "1": { "text": "ENGAGED", "color": "red" } } } ],
+        "color": { "mode": "thresholds" },
+        "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "surge_kill_switch_active" } ]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Open positions",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "surge_open_positions" } ]
+    },
+    {
+      "id": 4, "type": "gauge", "title": "Gross exposure",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1,
+        "thresholds": { "steps": [ { "color": "green", "value": null },
+          { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 0.8 } ] } } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "surge_gross_exposure_ratio" } ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Equity curve",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "surge_equity", "legendFormat": "equity {{mode}}" } ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Drawdown limits (daily/weekly/monthly P&L)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "surge_pnl_daily_ratio", "legendFormat": "daily" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "surge_pnl_weekly_ratio", "legendFormat": "weekly" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "surge_pnl_monthly_ratio", "legendFormat": "monthly" }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Activity (decisions / fills / candidates)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "surge_decisions_total", "legendFormat": "decisions" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "surge_fills_total", "legendFormat": "fills" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "surge_candidates", "legendFormat": "candidates" }
+      ]
+    }
+  ]
+}

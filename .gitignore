@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+.ruff_cache/
+# Local DB transients — never commit (per-process, not portable)
+*.db-wal
+*.db-shm
+
+# data/: commit ONLY the canonical SQLite state — the pipeline's persistent
+# learning memory that GitHub Actions reads at job start and updates daily.
+# Everything else under data/ (logs, dumps, scratch) stays local.
+data/*
+!data/surge.db

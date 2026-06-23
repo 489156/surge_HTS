@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>surge HTS</title>
+<style>
+  :root{
+    --bg:#0a0e17; --bg2:#0d1320; --panel:#131a28; --panel2:#0f1521;
+    --line:#222c41; --line2:#2c3850; --fg:#e3e9f5; --fg2:#aab6cf; --mut:#7e8caa;
+    --grn:#2ee6a6; --grnbg:#0e2c22; --red:#ff6b78; --redbg:#2c1318;
+    --amb:#ffc857; --ambbg:#2e2611; --blue:#5b9cff; --bluebg:#10233f;
+    --star:#c9a6ff; --starbg:#1e1633;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#101a2e 0,var(--bg) 55%);
+    color:var(--fg);font:13.5px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+  a{color:var(--blue)}
+  /* header */
+  header{display:flex;align-items:center;gap:14px;padding:11px 20px;background:rgba(10,14,23,.82);
+    backdrop-filter:blur(8px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:9}
+  header h1{font-size:15px;margin:0;letter-spacing:.5px;font-weight:700}
+  header h1 b{color:var(--grn)}
+  .grow{flex:1}
+  .pill{padding:3px 10px;border-radius:20px;font-size:11px;border:1px solid var(--line2);color:var(--fg2)}
+  .pill.ok{background:var(--grnbg);color:var(--grn);border-color:#1c4d3b}
+  .pill.halt{background:var(--redbg);color:var(--red);border-color:#5a242b}
+  button{background:#1a2336;color:var(--fg);border:1px solid var(--line2);border-radius:8px;
+    padding:7px 13px;cursor:pointer;font:inherit;font-weight:600;transition:.12s}
+  button:hover{border-color:var(--blue);background:#1f2a42}
+  button.danger{border-color:#5a242b;color:var(--red)} button.danger:hover{background:var(--redbg)}
+  .helpbar{display:flex;gap:18px;flex-wrap:wrap;padding:7px 20px;background:var(--bg2);
+    border-bottom:1px solid var(--line);color:var(--mut);font-size:11.5px}
+  .helpbar b{color:var(--fg2)}
+  /* layout */
+  main{max-width:1280px;margin:0 auto;padding:18px 20px 40px}
+  .sechead{display:flex;align-items:center;gap:10px;margin:26px 2px 12px}
+  .sechead:first-child{margin-top:6px}
+  .sechead .lbl{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--mut);font-weight:700}
+  .sechead .rule{flex:1;height:1px;background:linear-gradient(90deg,var(--line2),transparent)}
+  .sechead .tag{font-size:11px;color:var(--mut)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .span2{grid-column:1/3}
+  @media(max-width:780px){.grid{grid-template-columns:1fr}.span2{grid-column:1}}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+    border-radius:12px;padding:13px 15px}
+  .card h2{font-size:12px;margin:0 0 3px;font-weight:700;letter-spacing:.3px;color:var(--fg)}
+  .card .desc{color:var(--mut);font-size:10.8px;line-height:1.5;margin:0 0 9px}
+  .card .desc b{color:var(--fg2)}
+  /* hero verdict */
+  .hero{background:linear-gradient(180deg,#141d31,#0f1726);border:1px solid var(--line2);
+    border-radius:14px;padding:16px 18px;position:relative;overflow:hidden}
+  .hero::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;
+    background:linear-gradient(90deg,var(--star),var(--blue),var(--grn))}
+  .hero .q{font-size:12px;color:var(--mut);letter-spacing:.5px}
+  .hero .row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:6px}
+  .hero-badge{font-size:20px;font-weight:800;padding:6px 16px;border-radius:10px;letter-spacing:.3px}
+  .b-star{background:var(--starbg);color:var(--star);border:1px solid #4a3a70}
+  .b-edge{background:var(--bluebg);color:var(--blue);border:1px solid #2a4a78}
+  .b-none{background:#1a2030;color:var(--fg2);border:1px solid var(--line2)}
+  .hero .sub{color:var(--fg2);font-size:12.5px;flex:1;min-width:240px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:9px;
+    font-size:12px;border:1px solid var(--line2);background:#0e1626}
+  .chip b{font-weight:700} .chip .nm{color:var(--fg2)}
+  .chip.m-grn{border-color:#1c4d3b} .chip.m-red{border-color:#5a242b}
+  .chip.m-amb{border-color:#4a3d15} .chip.m-star{border-color:#4a3a70}
+  /* stats */
+  .stats{display:grid;grid-template-columns:repeat(8,1fr);gap:10px}
+  @media(max-width:780px){.stats{grid-template-columns:repeat(4,1fr)}}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px}
+  .stat .k{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px}
+  .stat .v{font-size:17px;font-weight:700;margin-top:2px}
+  .stat .v.big{font-size:20px}
+  /* tables */
+  table{width:100%;border-collapse:collapse;margin-top:2px}
+  th,td{text-align:right;padding:5px 7px;border-bottom:1px solid #1a2233;white-space:nowrap;font-size:12.5px}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--mut);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px}
+  tbody tr:last-child td{border-bottom:none}
+  .pos{color:var(--grn)} .neg{color:var(--red)} .mut{color:var(--mut)}
+  .tag2{padding:1px 7px;border-radius:5px;font-size:11px;font-weight:600}
+  .ok{background:var(--grnbg);color:var(--grn)} .warn{background:var(--ambbg);color:var(--amb)}
+  .halt{background:var(--redbg);color:var(--red)}
+  tr.clk{cursor:pointer} tr.clk:hover{background:#18223a}
+  .reason{color:var(--fg2);font-size:11px;white-space:normal;text-align:left;max-width:280px}
+  .note{margin-top:8px;font-size:11px;color:var(--mut);line-height:1.5}
+  .note b{color:var(--amb)}
+  .legend{font-size:10.8px;color:var(--mut);margin-top:8px;line-height:1.5}
+  /* engine layer — visually secondary */
+  .layerB{border:1px dashed var(--line2);border-radius:14px;padding:4px 12px 14px;margin-top:4px;
+    background:rgba(13,19,32,.4)}
+  .layerB .lead{font-size:11px;color:var(--mut);padding:9px 4px 2px}
+  .layerB .lead b{color:var(--fg2)}
+  /* today's brief */
+  #brief .brow{display:flex;gap:12px;padding:5px 0;align-items:baseline;border-top:1px solid var(--line)}
+  #brief .brow:first-child{border-top:none}
+  #brief .blbl{min-width:108px;color:var(--mut);font-size:11.5px;font-weight:700;flex-shrink:0;letter-spacing:.2px}
+  /* ── mobile (phone) ── */
+  @media(max-width:640px){
+    main{padding:12px 10px 32px}
+    header{flex-wrap:wrap;padding:9px 12px;gap:8px;position:static}
+    header h1{font-size:14px}
+    header .grow{flex:1 0 100%;order:5;height:0}     /* force buttons onto their own row */
+    button{padding:6px 10px;font-size:12px}
+    .helpbar{gap:10px;padding:6px 12px;font-size:11px}
+    .hero{padding:13px 14px}.hero .q{font-size:14px}
+    .card{padding:13px 13px}
+    /* tables scroll sideways instead of breaking the page */
+    table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+    #brief .blbl{min-width:82px}
+    .desc,.legend{font-size:11px}
+  }
+  @media(max-width:430px){ .stats{grid-template-columns:repeat(2,1fr)} }
+  /* ── inline visualizations ── */
+  .vbar{position:relative;height:9px;background:#0e1626;border:1px solid var(--line);border-radius:5px;min-width:108px;overflow:visible}
+  .vbar .fill{position:absolute;top:0;bottom:0;border-radius:3px}
+  .vbar .base{position:absolute;top:-2px;height:13px;width:2px;background:var(--amb);z-index:2}
+  .emeter{position:relative;height:6px;background:#0e1626;border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-top:4px;min-width:108px}
+  .emeter .efill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--blue),var(--grn))}
+  .estar{position:absolute;right:-1px;top:-3px;font-size:9px;color:var(--star)}
+  .gauge{position:relative;height:13px;margin-top:5px;min-width:120px}
+  .gtrack{position:absolute;left:0;right:0;top:5px;height:4px;border-radius:3px;background:linear-gradient(90deg,var(--red),#5b6680 50%,var(--grn))}
+  .gmark{position:absolute}
+  .gentry{top:0;height:13px;border-left:2px dashed var(--fg2)}
+  .gcur{top:2px;width:9px;height:9px;border-radius:50%;background:var(--blue);border:1.5px solid #fff;transform:translateX(-4.5px);z-index:3}
+  .dbar{position:relative;height:9px;background:#0e1626;border:1px solid var(--line);border-radius:5px;min-width:90px}
+  .dbar .dc{position:absolute;left:50%;top:-2px;height:13px;width:1px;background:var(--line2)}
+  .dbar .df{position:absolute;top:0;bottom:0;border-radius:3px}
+</style>
+</head>
+<body>
+<header>
+  <h1>surge&nbsp;<b>HTS</b></h1>
+  <span class="pill" id="mode">—</span>
+  <span class="pill" id="ks">—</span>
+  <div class="grow"></div>
+  <span class="mut mono" id="clock"></span>
+  <button onclick="runCycle()" title="모의 트레이딩 1회 실행: 후보 평가→토론→리스크→(페이퍼)체결. 실제 자금/주문 아님.">▶ Run cycle</button>
+  <button class="danger" onclick="fireKill()" title="비상 정지: 미체결 주문 취소 + 포지션 청산(페이퍼) + 신규 진입 차단.">■ Kill switch</button>
+  <button onclick="resetKill()" title="비상 정지 해제.">↺ Reset</button>
+</header>
+<div class="helpbar">
+  <span><b>상단 버튼(모의 엔진 · 실제 자금 아님)</b>:</span>
+  <span><b>▶ Run cycle</b> 후보 1회 평가→체결</span>
+  <span><b>■ Kill switch</b> 비상정지(취소·청산)</span>
+  <span><b>↺ Reset</b> 정지 해제</span>
+</div>
+
+<main>
+  <!-- HERO: verdict gate -->
+  <div class="hero">
+    <div class="q">이 시스템을 믿고 돈을 걸어도 되는가?</div>
+    <div class="row">
+      <span class="hero-badge b-none" id="hero-badge">—</span>
+      <span class="sub" id="hero-sub">불러오는 중…</span>
+    </div>
+    <div class="chips" id="hero-chips"></div>
+  </div>
+
+  <!-- TODAY'S BRIEF: one-glance synthesis of all layers -->
+  <div class="card span2" style="margin-top:14px">
+    <h2>오늘의 브리핑 <span class="mut" style="font-weight:400">· 한눈에 보는 오늘의 참조</span></h2>
+    <div class="desc">아래 계층을 자동 요약 — <b>지금 무엇을 보면 되는지</b> 한 줄씩. <b>⭐/🟢 격상 전에는 모두 가설(참고용)</b>이며 베팅 근거가 아니다.</div>
+    <div id="brief">불러오는 중…</div>
+  </div>
+
+  <!-- SECTION A: prediction / reference -->
+  <div class="sechead"><span class="lbl">① 예측·검증 참조</span><span class="rule"></span>
+    <span class="tag">매일 보는 정보 · 읽기 전용</span></div>
+
+  <div class="card span2">
+    <h2>검증 게이트</h2>
+    <div class="desc">아래 <b>duel 콜·rotation 후보</b>가 만든 예측을 각 전략의 <b>순진한 기준선</b>과 비교해, 운으로 설명 안 되는 초과가 있는지 통계로 판정한다. <b>⭐ 전까지 모든 출력은 '가설'</b> — 베팅 근거가 아니다.</div>
+    <table id="verdict"></table>
+    <div class="legend">📖 <b>전략 적중</b>=이 전략이 실제로 맞힌 비율 · <b>기준선(찍기)</b>=아무 정보 없이 '항상 강세'나 동전으로 찍었을 때 · <b>초과(실력)</b>=전략−기준선(운으로 설명 안 되는 차이=실력) · <b>표본 n</b>=채점된 횟수(클수록 신뢰) · <b>엣지 막대</b>=적중(채움)과 기준선(노란선)의 거리 · <b>신호증거 미터</b>=매일 들여다봐도 거짓양성이 안 늘어나는 <b>anytime-valid e-값</b>; 100%(e≥20)면 ⭐ 통계요건 충족. <b>게이트는 이항</b>(방향 적중) e-값 하나로 판정한다. <b>연속</b>(수익 크기)·<b>페어</b>(동일 세션 기준선 대조)는 <b>보조진단</b>일 뿐 게이트에 들어가지 않는다 — FWER 통제상 트랙을 게이트에 더하면 이항의 검정력을 깎을 뿐이라(공짜 없음), 보정된 단일 검정을 유지한다</div>
+    <div class="legend">⭐ 신호(5조건 충족·참조가능) · 🟢 통계적 엣지(가설) · 🟡 미검증 · 🔴 표본부족(n&lt;30) · ⛔ 기준선 이하</div>
+  </div>
+
+  <div class="grid" style="margin-top:14px">
+    <div class="card">
+      <h2>② 오늘밤 duel 콜 <span class="mut" style="font-weight:400">· US 레버리지</span></h2>
+      <div class="desc">미국장 6개 레버리지 페어 <b>방향 예측</b>. <b>확신</b>=신호 합의 강도(<b>확률·수익률 아님</b>): 관망(&lt;0.15)→하프(0.15~0.35)→풀(≥0.35). 진입/손절/익절=ATR 기계적 브래킷. ↑ ①의 'duel'이 누적 성적 판정 — ⭐ 전엔 참고만.</div>
+      <table id="duel"></table>
+      <div class="note" id="duel-asof">—</div>
+      <div class="note mono" id="duel-tally">—</div>
+    </div>
+    <div class="card">
+      <h2>③ rotation 후보 <span class="mut" style="font-weight:400">· KR 회전 · 행 클릭→현재가·연동·진입가</span></h2>
+      <div class="desc">한국 가치사슬 회전 후보. ✓=게이트 통과. <b>분석가</b>=분석일 종가. <b>행 클릭</b> 시 <b>현재가</b> + 체인 선두주 <b>가격 연동</b> + <b>기계적 ATR 매수존/손절/목표</b>(참조용, 추천 아님). <b>핫노드(후방0) 추격 금지.</b></div>
+      <div class="note" id="rotation-asof">—</div>
+      <table id="rotation"></table>
+      <div class="legend">📖 <b>체인 위치</b>=가치사슬 역할(예: HBM 후방공정) · <b>후방거리</b>=급등한 선두에서 몇 단계 뒤 — <b>0=이미 달궈진 선두(추격금지)</b>, 1↑=아직 안 온 후방(선호) · <b>점수</b>=팩터 종합(높을수록 우선) · <b>✓</b>=5조건 게이트 통과</div>
+      <div class="note" id="rotation-factor">—</div>
+      <div class="note" id="rotation-detail">후보 행을 클릭하면 현재가·연동·기계적 진입가</div>
+    </div>
+  </div>
+
+  <div class="card span2" style="margin-top:14px">
+    <h2>섀도 팩터 — "어떤 팩터를 추가할까?" <span class="mut" style="font-weight:400">· 진화 학습 루프</span></h2>
+    <div class="desc">라이브 투표에 <b>아직 없는</b> 후보 신호를 매 세션 기록 → 실측 방향과 단독 대조(라이브 결정엔 미관여). 기준선(always-bull/bear)을 <b>Šidák 보정 유의수준으로 초과</b>하는 후보만 사람이 가중치에 추가 — 노이즈 팩터 자동 차단. <code>surge factors --backfill</code>로 2년치 즉시 채움.</div>
+    <table id="factors"></table>
+    <div class="note" id="factors-note">—</div>
+  </div>
+
+  <!-- CURATED WATCH: hand-maintained tracking universe -->
+  <div class="card span2" style="margin-top:14px">
+    <h2>관찰 종목 <span class="mut" style="font-weight:400">· 큐레이션 추적(손수 관리) · 추천 아님</span></h2>
+    <div class="desc">시장 전체 스크리닝이 아니라 <b>손수 고른 소수</b>를 주기 추적. <b>현재가</b>는 US만 실시간(Finnhub)·KR은 키리스 실시간 없음(테마만). <b>여지</b>=장기 10배 옵셔널리티(정성, 확률 아님). 원전·SMR(LEU·OKLO·SMR) 등 테마별. <code>surge watch</code> CLI에 ATR 레벨·도시에 상세.</div>
+    <table id="watch"></table>
+    <div class="note" id="watch-note">—</div>
+  </div>
+
+  <!-- DAILY SELF-IMPROVEMENT LOG -->
+  <div class="card span2" style="margin-top:14px">
+    <h2>🧠 매일 자기개선 로그 <span class="mut" style="font-weight:400">· 자동 · surge daily</span></h2>
+    <div class="desc">프로그램이 <b>매일 스스로</b> 한 일의 기록 — 어제 콜 채점(증분) → 자기 진단으로 <b>새 가설 발굴</b> → 전략 증거 재판정 → 변화 기록. <b>승격은 자동이 아니라 사람 승인</b>(여기엔 후보만 표시). <code>surge daily</code>를 매일 1회 예약 실행하면 채워진다.</div>
+    <table id="learning"></table>
+    <div class="note" id="learning-trend"></div>
+    <div class="note" id="learning-note">—</div>
+  </div>
+
+  <!-- SECTION B: paper trading engine (secondary) -->
+  <div class="sechead"><span class="lbl">② 모의 트레이딩 엔진</span><span class="rule"></span>
+    <span class="tag">①②③을 자동매매로 시험 · 실제 자금 아님</span></div>
+  <div class="layerB">
+    <div class="lead">매수 기준: <b>surge 후보</b> → 에이전트 평가 → 토론 net≥55 매수(≥65 풀) → 리스크 통과 → (페이퍼)체결. <b>KR rotation과 다른 thesis</b>이며 surge는 현재 ⛔ — 이 포지션은 추천이 아니라 '검증 안 된 신호로 매매하면?'의 실험.</div>
+
+    <div class="stats" style="margin:10px 0 14px">
+      <div class="stat"><div class="k">Equity</div><div class="v big mono" id="equity">—</div></div>
+      <div class="stat"><div class="k">Cash</div><div class="v mono" id="cash">—</div></div>
+      <div class="stat"><div class="k">Status</div><div class="v" id="status">—</div></div>
+      <div class="stat"><div class="k">Daily</div><div class="v mono" id="daily">—</div></div>
+      <div class="stat"><div class="k">Weekly</div><div class="v mono" id="weekly">—</div></div>
+      <div class="stat"><div class="k">Monthly</div><div class="v mono" id="monthly">—</div></div>
+      <div class="stat"><div class="k">Exposure</div><div class="v mono" id="exposure">—</div></div>
+      <div class="stat"><div class="k">Positions</div><div class="v mono" id="npos">—</div></div>
+    </div>
+
+    <div class="card span2">
+      <h2>자산 곡선 · 기간 수익 (모의)</h2>
+      <div class="desc">페이퍼 계좌 평가액(account_history) 추이. <b>개별 +90%는 로또 꼬리</b> — 전체 곡선·승률·중앙값으로 판단(체리피킹 금지).</div>
+      <div id="equity-chart" style="margin:6px 0"></div>
+      <div class="note" id="equity-note">—</div>
+    </div>
+
+    <div class="grid" style="margin-top:14px">
+      <div class="card"><h2>보유 포지션</h2>
+        <div class="desc">현재 보유 모의 포지션 · uPnL=미실현손익. <b>코호트 전체로</b> 보세요(아래 승률).</div>
+        <table id="positions"></table>
+        <div class="note" id="positions-cohort">—</div></div>
+      <div class="card"><h2>Watchlist · surge 후보</h2>
+        <div class="desc">surge 점화 스크리너 상위 = 엔진의 매수 유니버스. 예측 검증은 ①의 surge 행.</div><table id="watchlist"></table></div>
+      <div class="card"><h2>결정 로그 <span class="mut" style="font-weight:400">· 행 클릭→의견</span></h2>
+        <div class="desc">엔진의 매매 결정. net=종합점수, conf=확신도.</div><table id="decisions"></table></div>
+      <div class="card"><h2>에이전트 의견</h2>
+        <div class="desc">선택한 결정의 에이전트별 점수·근거.</div><table id="opinions"></table>
+        <div class="mut" id="opinions-hint" style="font-size:11px;margin-top:4px">결정 행을 선택하세요</div></div>
+      <div class="card"><h2>체결 내역</h2>
+        <div class="desc">실제 체결된 모의 거래.</div><table id="trades"></table></div>
+      <div class="card"><h2>리스크 한도 &amp; 상태</h2>
+        <div class="desc">넘으면 Kill switch 자동 발동.</div><table id="risk"></table></div>
+      <div class="card"><h2>승인 대기</h2>
+        <div class="desc">라이브용 사람-승인 안전장치. <b>현재 실거래 미연결</b>(DASHBOARD.md §5).</div><table id="approvals"></table></div>
+      <div class="card"><h2>감사 로그 / 알림</h2>
+        <div class="desc">모든 행동의 추적 기록.</div><table id="audit"></table></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $=s=>document.querySelector(s);
+const fmt=(n,d=2)=>n==null?'—':Number(n).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const pct=n=>n==null?'—':(n*100).toFixed(1)+'%';
+const pp=n=>n==null?'—':(n*100).toFixed(0)+'%';
+const cls=n=>n>0?'pos':n<0?'neg':'';
+const thead=cols=>'<tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
+const emptyRow=n=>`<tr><td class="mut" colspan="${n}">—</td></tr>`;
+async function j(u,o){const r=await fetch(u,o);return r.json();}
+const markCls=m=>({'🟢':'m-grn','⛔':'m-red','🔴':'m-red','🟡':'m-amb','⭐':'m-star'}[m]||'');
+// ── inline-viz helpers ──
+const edgeBar=(v,b)=>{ if(v==null||b==null) return '<span class="mut">—</span>';
+  const V=v*100,B=b*100,lo=Math.min(V,B),w=Math.abs(V-B),up=V>=B;
+  return `<div class="vbar" title="적중 ${V.toFixed(0)}% vs 기준 ${B.toFixed(0)}%"><div class="fill" style="left:${lo}%;width:${Math.max(w,1)}%;background:${up?'var(--grn)':'var(--red)'}"></div><div class="base" style="left:${B}%"></div></div>`; };
+const evMeter=(pct,ev)=>{ const p=Math.round((pct||0)*100);
+  return `<div class="emeter" title="신호 증거 e=${ev==null?'—':ev} / 20(=1/α)"><div class="efill" style="width:${p}%"></div>${p>=100?'<span class="estar">⭐</span>':''}</div><div class="mut" style="font-size:10px;margin-top:1px">신호까지 ${p}% <span class="mono">e=${ev==null?'—':fmt(ev,1)}</span></div>`; };
+const duelGauge=(stop,entry,target,cur)=>{ if(!stop||!target||stop>=target) return '';
+  const span=target-stop,pos=x=>Math.max(0,Math.min(100,(x-stop)/span*100));
+  const eP=entry?pos(entry):null,cP=cur!=null?pos(cur):null;
+  return `<div class="gauge" title="손절 ${stop} · 진입 ${entry} · 익절 ${target} · 현재 ${cur}"><div class="gtrack"></div>${eP!=null?`<div class="gmark gentry" style="left:${eP}%"></div>`:''}${cP!=null?`<div class="gmark gcur" style="left:${cP}%"></div>`:''}</div>`; };
+const divBar=dd=>{ if(dd==null) return '<span class="mut">—</span>';
+  const mag=Math.min(Math.abs(dd),20)/20*50,up=dd>=0;
+  return `<div class="dbar" title="기준선 대비 ${dd>0?'+':''}${dd.toFixed(0)}%p"><div class="dc"></div><div class="df" style="${up?'left:50%':'right:50%'};width:${mag}%;background:${up?'var(--grn)':'var(--red)'}"></div></div>`; };
+const shortName=s=>s.split(' ')[0];
+
+async function refresh(){
+  $('#clock').textContent=new Date().toLocaleTimeString();
+
+  // ── HERO: verdict gate ──
+  const vg=await j('/api/verdict'); const S=vg.strategies||[];
+  const nStar=S.filter(x=>x.mark==='⭐').length, nEdge=S.filter(x=>x.mark==='🟢').length;
+  let badge='검증된 신호 없음', bcls='b-none';
+  if(nStar){badge=`⭐ 신호 ${nStar}개`;bcls='b-star';}
+  else if(nEdge){badge=`🟢 엣지 ${nEdge}개 · 신호 격상 전`;bcls='b-edge';}
+  $('#hero-badge').textContent=badge; $('#hero-badge').className='hero-badge '+bcls;
+  $('#hero-sub').textContent=vg.headline||'';
+  $('#hero-chips').innerHTML=S.map(x=>
+    `<span class="chip ${markCls(x.mark)}">${x.mark} <span class="nm">${shortName(x.strategy)}</span> <b class="mono">${x.value==null?'—':pp(x.value)}</b> <span class="mut mono">n${x.n}</span></span>`).join('');
+  $('#verdict').innerHTML=thead(['','전략','전략 적중','기준선(찍기)','초과(실력)','표본 n','엣지 · 신호증거','판정'])+S.map(x=>
+    `<tr><td>${x.mark}</td><td>${x.strategy}</td><td class="mono">${pp(x.value)}</td><td class="mono">${pp(x.baseline)}</td><td class="mono ${cls(x.excess)}">${x.excess==null?'—':(x.excess*100).toFixed(0)+'%p'}</td><td class="mono">${x.n}</td><td style="min-width:124px">${edgeBar(x.value,x.baseline)}${evMeter(x.evidence_pct,x.evalue)}<div class="mut" style="font-size:9.5px">게이트=이항 · <span class="mut">보조진단</span> 연속 ${fmt(x.evalue_ret,1)}${x.paired_e>0?' · 페어 '+fmt(x.paired_e,1):''}</div></td><td class="reason mut">${x.verdict}</td></tr>`).join('')||emptyRow(8);
+
+  // ── duel ──
+  const du=await j('/api/duel');
+  $('#duel').innerHTML=thead(['pair','방향·확신','진입','현재(실시간)','손절','익절'])+(du.calls||[]).map(x=>{
+    const c=Math.abs(x.score),dir=x.score>=0?'▲강세':'▼약세';
+    const tier=c<0.15?'관망':c<0.35?'하프':'풀',bar=c<0.15?'○○○':c<0.35?'●●○':'●●●';
+    const dv=x.side==='STAND_ASIDE'?'<span class="mut">⏸ 관망</span>'
+      :`<b>${x.side}</b> <span class="${cls(x.score)}">${dir}</span> · 확신 ${tier} <span class="mut mono">${bar}</span>`;
+    const cur=x.current!=null?'$'+fmt(x.current):'—';
+    let curCell=cur;                                  // live price + move-vs-static-call
+    if(x.current!=null&&x.entry_ref){
+      const dEnt=(x.current-x.entry_ref)/x.entry_ref*100; let tag='';
+      if(x.stop_price&&x.target_price){
+        const toStop=(x.current-x.stop_price)/x.current*100, toTgt=(x.target_price-x.current)/x.current*100;
+        if(toStop<=0) tag=' <span class="neg">손절이탈</span>';
+        else if(toTgt<=0) tag=' <span class="pos">익절돌파</span>';
+        else if(toStop<=1) tag=' <span class="neg">손절근접</span>';
+        else if(toTgt<=1) tag=' <span class="pos">익절근접</span>';
+        else if(Math.abs(dEnt)<0.5) tag=' <span class="mut">진입권</span>';}
+      curCell=`${cur}<br><span style="font-size:11px">vs진입 <span class="${cls(dEnt)}">${dEnt>=0?'+':''}${dEnt.toFixed(1)}%</span>${tag}</span>`
+        +duelGauge(x.stop_price,x.entry_ref,x.target_price,x.current);}   // 손절↔익절 위치 게이지
+    return `<tr><td class="mut">${x.pair}</td><td>${dv}</td><td class="mono">${x.entry_ref?'$'+fmt(x.entry_ref):'—'}</td><td class="mono">${curCell}</td><td class="mono">${x.stop_price?'$'+fmt(x.stop_price):'—'}</td><td class="mono">${x.target_price?'$'+fmt(x.target_price):'—'}</td></tr>`;}).join('')||emptyRow(6);
+  const age=du.calls&&du.calls[0]?du.calls[0].age_hours:null;
+  $('#duel-asof').innerHTML=`콜: <b>${du.date||'—'}</b> 세션 · 생성 ${age==null?'—':age+'h 전'}`
+    +(du.stale?' <span class="neg">⚠ 미갱신 — 생성기 대기/미실행 (예약: 21:50 KST 월–금, 주말 정상 스킵). 주말·월요일 이슈는 갱신 시 그날 아시아장 선행으로 반영됨. 즉시 갱신: <code>surge duel</code></span>':'')
+    +` · 현재가 ${du.fetched_at?du.fetched_at.slice(11,16)+' UTC':'—'} 라이브 (진입=콜 시점·현재=실시간)`;
+  const dt=du.tally||{},nb=(dt.wins||0)+(dt.losses||0);
+  $('#duel-tally').textContent=dt.accuracy==null?'누적 채점 없음':
+    `누적 베팅 ${nb} · 적중률 ${(dt.accuracy*100).toFixed(0)}%${nb<30?' (표본부족 n<30)':''} · 평균손익 ${dt.avg_pnl_pct==null?'—':(dt.avg_pnl_pct*100).toFixed(1)+'%'}`;
+
+  // ── rotation ──
+  const ro=await j('/api/rotation');
+  $('#rotation').innerHTML=thead(['종목','체인 위치','후방거리','점수','분석가','통과'])+(ro.candidates||[]).map(x=>
+    `<tr class="clk" onclick="loadRot('${x.ticker}','${(x.name||x.ticker).replace(/'/g,'')}')"><td>${x.name||x.ticker}</td><td class="mut">${x.node||'—'}</td><td class="mono">${x.back_steps==null?'—':x.back_steps}</td><td class="mono">${fmt(x.score,2)}</td><td class="mono">${x.ref_close?'₩'+fmt(x.ref_close,0):'—'}</td><td>${x.passed_filter?'<span class="tag2 ok">✓</span>':'<span class="mut">·</span>'}</td></tr>`).join('')||emptyRow(6);
+  $('#rotation-asof').innerHTML=`분석: <b>${ro.date||'—'}</b> 세션 · 생성 ${ro.age_hours==null?'—':ro.age_hours+'h 전'}`
+    +(ro.stale?' <span class="neg">⚠ 신규 분석 없음(KR 마감 후 1회) → surge rotation 필요</span>':'')
+    +` · 분석가=분석일 종가 · 현재가는 행 클릭`;
+  const kf=ro.kr_factor;
+  if(kf&&kf.top){const t=kf.top[1]||kf.top;const nm=kf.top[0]||'kr_search_surge';
+    const verdict=kf.recommend?'<span class="pos">추가 후보</span>':(t.caveat?'<span class="neg">⚠ '+t.caveat+'</span>':'<span class="mut">기저 미초과</span>');
+    $('#rotation-factor').innerHTML=`🔎 KR 팩터(${nm}): 점화시 +10%도달 <b class="mono">${pp(t.acc)}</b> vs 기저 <b class="mono">${pp(kf.baseline)}</b> (n${t.n}) — ${verdict}`;}
+
+  // ── shadow factors (the "what to add" loop) ──
+  const fb=await j('/api/factors'),base=fb.baseline;
+  $('#factors').innerHTML=thead(['후보 팩터','적중률','n','기준선 대비','시각화'])+(fb.ranked||[]).map(x=>{
+    const dd=(x.acc!=null&&base!=null)?(x.acc-base)*100:null;
+    return `<tr><td>${x.factor}</td><td class="mono">${pp(x.acc)}</td><td class="mono">${x.n}</td><td class="mono ${cls(dd)}">${dd==null?'—':(dd>0?'+':'')+dd.toFixed(0)+'%p'}</td><td>${divBar(dd)}</td></tr>`;}).join('')||emptyRow(5);
+  $('#factors-note').innerHTML=fb.recommend
+    ?`🧩 <b>추가 후보: ${fb.recommend.factor}</b> — 기준선 ${(base*100).toFixed(0)}% 유의 초과(z=${fb.recommend.z.toFixed(2)})`
+    :`추가 후보 없음 · 기준선(always-bull) <b>${base==null?'—':(base*100).toFixed(0)+'%'}</b> — 현 후보군은 기준선을 유의하게 못 넘음`;
+
+  // ── curated watch (hand-maintained tracking universe; US live, KR theme-only) ──
+  const wa=await j('/api/watch'),WI=wa.items||[];
+  const roomLbl={high:'<span class="pos">높음</span>',mid:'중',low:'<span class="mut">낮음</span>',na:'<span class="mut">—</span>'};
+  const hzLbl={short:'단기',swing:'스윙',long:'장기'};
+  $('#watch').innerHTML=thead(['종목','테마','시장','현재가','지평','여지(10x)'])+WI.map(x=>{
+    const px=x.mkt==='us'?(x.price!=null?'$'+fmt(x.price):'<span class="mut">—</span>'):'<span class="mut">— (KR 실시간없음)</span>';
+    const hz=(x.h||[]).map(z=>hzLbl[z]||z).join('·');
+    return `<tr><td><b>${x.t}</b> <span class="mut">${x.name}</span></td><td class="mut">${x.theme}</td><td class="mut">${(x.mkt||'').toUpperCase()}</td><td class="mono">${px}</td><td class="mut">${hz}</td><td>${roomLbl[x.room]||x.room}</td></tr>`;}).join('')||emptyRow(6);
+  const nUS=WI.filter(z=>z.mkt==='us').length;
+  $('#watch-note').innerHTML=`${WI.length}종목 추적 · US ${nUS}(실시간) / KR ${WI.length-nUS}(테마) · <b>원전·SMR</b>: LEU·OKLO·SMR 포함 · 추천 아님(추적용)`;
+
+  // ── daily self-improvement log ──
+  const lg=await j('/api/learning'),LR=lg.runs||[];
+  $('#learning').innerHTML=thead(['날짜','채점(증분)','신규 발굴 가설','변화','승인 대기'])+LR.map(x=>{
+    const sc=x.scored||{},nv=v=>v==null?'—':v;
+    const scored=`duel ${nv(sc.duel)}·rot ${nv(sc.rotation)}·surge ${nv(sc.surge)}`;
+    const disc=(x.discovered_new||[]).length?`<span class="pos">${x.discovered_new.join(', ')}</span>`:'<span class="mut">없음</span>';
+    const chg=(x.changes||[]).length?x.changes.join(' · '):'<span class="mut">—</span>';
+    const pr=(x.promote_ready||[]).length?`<span class="pos">${x.promote_ready.join(', ')} ⏳승인대기</span>`:'<span class="mut">—</span>';
+    const w=(x.warnings||[]).length?` <span class="neg" title="${x.warnings.join(', ')}">⚠${x.warnings.length}</span>`:'';
+    const st=(x.stale_inputs||[]).length?` <span class="neg" title="예약 실행 점검 필요 — 입력이 오래됨">⏰${x.stale_inputs.join('·')}</span>`:'';
+    return `<tr><td class="mut">${x.run_date||'—'}${w}${st}</td><td class="mono">${scored}</td><td>${disc}</td><td>${chg}</td><td>${pr}</td></tr>`;}).join('')||emptyRow(5);
+  $('#learning-note').innerHTML=LR.length?`최근 ${LR.length}회 실행 · 최신 판정: <b>${LR[0].headline||'—'}</b>`:'아직 실행 기록 없음 — <code>surge daily</code> 1회 실행(또는 매일 예약)';
+  // convergence monitor: evidence trajectory toward a validated signal (the long-term insight)
+  const tr=lg.trend||{},spark=pts=>{const vs=(pts||[]).map(p=>p.pct).filter(v=>v!=null);if(!vs.length)return '<span class="mut">—</span>';
+    const W=70,H=14,n=vs.length,cl=v=>Math.max(0,Math.min(1,v));
+    const dd=vs.map((v,i)=>`${i?'L':'M'}${(n<2?W/2:i*W/(n-1)).toFixed(1)},${(H-cl(v)*H).toFixed(1)}`).join(' ');
+    const last=vs[vs.length-1],first=vs[0],dir=last>first+0.005?'<span class="pos">▲</span>':last<first-0.005?'<span class="neg">▼</span>':'<span class="mut">→</span>';
+    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:70px;height:14px;vertical-align:middle" title="윗선=신호 임계(100%)"><line x1="0" y1="0.7" x2="${W}" y2="0.7" stroke="var(--star)" stroke-width="0.6" opacity=".5"/><path d="${dd}" fill="none" stroke="var(--blue)" stroke-width="1.5"/></svg> <span class="mono">${(cl(last)*100).toFixed(0)}%</span>${dir}`;};
+  const tks=Object.keys(tr);
+  $('#learning-trend').innerHTML=tks.length?('📈 <b>증거 추이(수렴 모니터)</b> <span class="mut">— 신호 임계(윗선)까지 진척이 쌓이는가</span>: '+tks.map(k=>`${k} ${spark(tr[k])}`).join(' &nbsp; ')):'';
+
+  // ── engine: account ──
+  const h=await j('/api/health');
+  $('#mode').textContent='mode · '+h.mode;
+  $('#ks').textContent='kill switch · '+h.kill_switch;
+  $('#ks').className='pill '+(h.halted?'halt':'ok');
+  const p=await j('/api/portfolio');
+  $('#equity').textContent='$'+fmt(p.equity,0);
+  $('#cash').textContent='$'+fmt(p.cash,0);
+  $('#status').innerHTML='<span class="tag2 '+(p.status==='ok'?'ok':p.status==='warn'?'warn':'halt')+'">'+p.status+'</span>';
+  for(const k of ['daily','weekly','monthly']) $('#'+k).innerHTML='<span class="'+cls(p[k])+'">'+pct(p[k])+'</span>';
+  $('#exposure').textContent=pct(p.exposure);
+  $('#npos').textContent=p.n_positions;
+  const PZ=p.positions||[];
+  $('#positions').innerHTML=thead(['sym','qty','avg','last','수익%','uPnL'])+PZ.map(x=>{
+    const g=(x.last&&x.avg_price)?(x.last/x.avg_price-1)*100:null;
+    return `<tr><td>${x.symbol}</td><td class="mono">${fmt(x.qty,0)}</td><td class="mono">${fmt(x.avg_price)}</td><td class="mono">${fmt(x.last)}</td><td class="mono ${cls(g)}">${g==null?'—':(g>0?'+':'')+g.toFixed(0)+'%'}</td><td class="mono ${cls(x.unrealized)}">${fmt(x.unrealized)}</td></tr>`;}).join('')||emptyRow(6);
+  // cohort honesty — show the WHOLE distribution so winners aren't cherry-picked
+  const gns=PZ.map(x=>(x.last&&x.avg_price)?(x.last/x.avg_price-1)*100:null).filter(v=>v!=null).sort((a,b)=>a-b);
+  const Wn=gns.filter(v=>v>0).length, med=gns.length?gns[Math.floor(gns.length/2)]:null;
+  $('#positions-cohort').innerHTML=PZ.length?`코호트 <b>${PZ.length}종목</b> · 상승 <span class="pos">${Wn}</span>/하락 <span class="neg">${PZ.length-Wn}</span> (승률 ${(Wn/PZ.length*100).toFixed(0)}%) · <b>중앙값 <span class="${cls(med)}">${med==null?'—':(med>0?'+':'')+med.toFixed(0)+'%'}</span></b> — 큰 +수익은 소수 로또, 중앙값이 전형적 결과`:'—';
+
+  // ── equity curve (returns by period) ──
+  const eq=await j('/api/equity'),EP=eq.points||[];
+  if(EP.length>=2){const ww=600,hh=80,pd=4,vs=EP.map(z=>z.equity),mn=Math.min(...vs),mx=Math.max(...vs),rg=(mx-mn)||1;
+    const dd=EP.map((z,i)=>`${i?'L':'M'}${(pd+i*(ww-2*pd)/(EP.length-1)).toFixed(1)},${(hh-pd-(z.equity-mn)/rg*(hh-2*pd)).toFixed(1)}`).join(' ');
+    const up=(eq.total_return||0)>=0;
+    $('#equity-chart').innerHTML=`<svg viewBox="0 0 ${ww} ${hh}" preserveAspectRatio="none" style="width:100%;height:80px"><path d="${dd}" fill="none" stroke="${up?'var(--grn)':'var(--red)'}" stroke-width="1.5"/></svg>`;
+  }else $('#equity-chart').innerHTML='<span class="mut">데이터 부족 — 거래 사이클(Run cycle) 실행 후 누적</span>';
+  $('#equity-note').innerHTML=`시작 $${fmt(eq.start_capital,0)} → 현재 $${fmt(eq.equity,0)} · 총수익 <b class="${cls(eq.total_return)}">${pct(eq.total_return)}</b> · ${eq.n} 스냅샷`;
+
+  // ── today's brief (one-glance synthesis; reuses already-fetched data, no new fetch) ──
+  const brow=(l,html)=>`<div class="brow"><span class="blbl">${l}</span><span>${html}</span></div>`;
+  const vTxt=nStar?`<span class="pos">⭐ 신호 ${nStar}개 — 참조 가능</span>`
+    :nEdge?`<span class="pos">🟢 엣지 ${nEdge}개</span> <span class="mut">— ⭐ 격상 전, 아직 가설</span>`
+    :'<span class="mut">검증된 엣지 없음 — 모든 콜은 가설(참고용)</span>';
+  const liv=(du.calls||[]).filter(x=>x.side&&x.side!=='STAND_ASIDE')
+    .sort((a,b)=>Math.abs(b.score)-Math.abs(a.score));
+  let dTxt;
+  if(liv.length){const t=liv[0],c=Math.abs(t.score),tier=c<0.15?'관망':c<0.35?'하프':'풀';
+    dTxt=`<b>${t.side}</b> <span class="${cls(t.score)}">${t.score>=0?'▲강세':'▼약세'}</span> · 확신 ${tier}`
+      +` <span class="mut">(${t.pair}${liv.length>1?` 외 ${liv.length-1}콜`:''})</span>`;}
+  else dTxt='<span class="mut">전 종목 관망 — 베팅 콜 없음(정상)</span>';
+  if(du.stale) dTxt+=' <span class="neg">⚠ 콜 오래됨</span>';
+  const pas=(ro.candidates||[]).filter(x=>x.passed_filter);
+  let rTxt=pas.length?`<b>게이트 통과 ${pas.length}개</b> · 대표 ${pas[0].name||pas[0].ticker} <span class="mut">(행 클릭→현재가)</span>`
+    :`<span class="mut">게이트 통과 0 · 관찰 ${(ro.candidates||[]).length}개</span>`;
+  if(ro.stale) rTxt+=' <span class="neg">⚠ 분석 오래됨</span>';
+  const aTxt=`평가액 $${fmt(p.equity,0)} · 누적수익 <b class="${cls(eq.total_return)}">${pct(eq.total_return)}</b> <span class="mut">(모의·실제자금 아님)</span>`;
+  const act=nStar?'<b class="pos">참조 가능한 ⭐신호 존재 — 검증 게이트에서 상세 확인</b>'
+    :'<b class="mut">오늘의 행동 → 관찰만. 검증된 엣지 없음 = 베팅 근거 아님</b>';
+  $('#brief').innerHTML=brow('검증 상태',vTxt)+brow('오늘밤 duel',dTxt)
+    +brow('KR rotation',rTxt)+brow('모의계좌',aTxt)+brow('→ 행동',act);
+
+  const w=await j('/api/watchlist?limit=12');
+  $('#watchlist').innerHTML=thead(['sym','score','price','chg','float','rvol'])+w.map(x=>
+    `<tr><td>${x.symbol}</td><td class="mono">${fmt(x.score,1)}</td><td class="mono">${fmt(x.close)}</td><td class="mono ${cls(x.pct_change)}">${x.pct_change==null?'—':fmt(x.pct_change,0)+'%'}</td><td class="mono">${x.shares_float?fmt(x.shares_float/1e6,1)+'M':'—'}</td><td class="mono">${fmt(x.rvol,1)}</td></tr>`).join('')||emptyRow(6);
+
+  const d=await j('/api/decisions?limit=10');
+  $('#decisions').innerHTML=thead(['time','sym','action','net','conf'])+d.map(x=>
+    `<tr class="clk" onclick="loadOps('${x.decision_id}')"><td class="mut mono">${(x.ts||'').slice(11,19)}</td><td>${x.symbol}</td><td>${x.action}</td><td class="mono">${fmt(x.final_score,1)}</td><td class="mono">${fmt(x.confidence,0)}</td></tr>`).join('')||emptyRow(5);
+
+  const t=await j('/api/trades?limit=12');
+  $('#trades').innerHTML=thead(['time','sym','side','qty','price'])+t.map(x=>
+    `<tr><td class="mut mono">${(x.ts||'').slice(11,19)}</td><td>${x.symbol}</td><td class="${x.side==='buy'?'pos':'neg'}">${x.side}</td><td class="mono">${fmt(x.qty,0)}</td><td class="mono">${fmt(x.price)}</td></tr>`).join('')||emptyRow(5);
+
+  const r=await j('/api/risk'),lim=r.limits;
+  $('#risk').innerHTML=thead(['metric','value'])+
+    [['daily limit',pct(lim.daily)],['weekly limit',pct(lim.weekly)],['monthly limit',pct(lim.monthly)],
+     ['max position',pct(lim.max_position)],['max concurrent',lim.max_concurrent]]
+    .map(([k,v])=>`<tr><td>${k}</td><td class="mono">${v}</td></tr>`).join('');
+
+  const ap=await j('/api/approvals');
+  $('#approvals').innerHTML=thead(['order','side','qty','sym',''])+ap.map(x=>
+    `<tr><td class="mut mono">${x.order_id.slice(0,8)}</td><td>${x.side}</td><td class="mono">${fmt(x.qty,0)}</td><td>${x.symbol}</td><td><button onclick="approve('${x.order_id}','approve')">✓</button> <button class="danger" onclick="approve('${x.order_id}','reject')">✗</button></td></tr>`).join('')||emptyRow(5);
+
+  const a=await j('/api/audit?limit=16');
+  $('#audit').innerHTML=thead(['time','actor','event','sym'])+a.map(x=>
+    `<tr><td class="mut mono">${(x.ts||'').slice(11,19)}</td><td>${x.actor}</td><td>${x.event}</td><td>${x.symbol||''}</td></tr>`).join('')||emptyRow(4);
+}
+async function loadOps(id){
+  const o=await j('/api/opinions/'+id);
+  $('#opinions-hint').textContent=id;
+  $('#opinions').innerHTML=thead(['agent','score','conf','rec','reasoning'])+o.map(x=>
+    `<tr><td>${x.agent.replace('_agent','')}</td><td class="mono">${fmt(x.score,0)}</td><td class="mono">${fmt(x.confidence,0)}</td><td>${x.recommendation}</td><td class="reason">${x.reasoning}</td></tr>`).join('');
+}
+async function loadRot(t,name){
+  $('#rotation-detail').textContent='불러오는 중… '+name;
+  const d=await j('/api/rotation/'+t);
+  if(d.error){$('#rotation-detail').textContent='조회 실패: '+d.error;return;}
+  const lk=d.linkage,lv=d.levels,po=d.policy;
+  const link=lk?`연동: <b>${lk.leader_name||lk.leader}</b> 상관 <b class="mono ${lk.corr>0?'pos':lk.corr<0?'neg':''}">${lk.corr==null?'—':lk.corr.toFixed(2)}</b>`:'연동: 체인 선두 없음';
+  const cur=(lv&&lv.last!=null)?`현재 <b class="mono">₩${fmt(lv.last,0)}</b> <span class="mut">(최근 종가)</span> · `:'';
+  const lev=lv?`${cur}매수존 <b class="mono">₩${fmt(lv.buy_lo,0)}~${fmt(lv.buy_hi,0)}</b> · 손절 <span class="mono neg">₩${fmt(lv.stop,0)}</span> · 목표 <span class="mono pos">₩${fmt(lv.target,0)}</span> <span class="mut">(ATR ${lv.atr_pct}%)</span>`:'가격대 산출 불가';
+  const pol=po?`<br>🏛 <b>정책태그</b>: ${po.name.split('(')[0]} · ${po.theme} · Tier ${po.tier} <span class="mut">(${po.reason} — 서술, 검증은 policy_tagged 팩터)</span>`:'';
+  $('#rotation-detail').innerHTML=`<b>${d.name}</b> <span class="mut">[${d.chain||'—'}:${d.node||'—'} 후방${d.back_steps==null?'—':d.back_steps}]</span>${pol}<br>${link}<br>${lev}<br><b>※ ${d.note}</b>`;
+}
+async function runCycle(){await j('/api/trade?top=10',{method:'POST'});refresh();}
+async function fireKill(){if(confirm('Kill switch — 모의 주문 취소·청산?')){await j('/api/killswitch?reason=dashboard',{method:'POST'});refresh();}}
+async function resetKill(){await j('/api/killswitch/reset',{method:'POST'});refresh();}
+async function approve(id,act){await j('/api/approvals/'+id+'?action='+act,{method:'POST'});refresh();}
+refresh();setInterval(refresh,6000);
+</script>
+</body>
+</html>

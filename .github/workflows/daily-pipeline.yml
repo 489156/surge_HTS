@@ -1,0 +1,76 @@
+name: surge-daily-pipeline
+
+# Token-free daily automation: replaces the Claude Code routines with GitHub Actions.
+# The whole pipeline (crawl → score → evolve → judge → record) is deterministic Python
+# with ZERO LLM calls, so it runs free inside GitHub's runners and commits its state back.
+
+on:
+  schedule:
+    # GitHub cron is UTC. Two market-aligned runs (steps are idempotent — overlap is safe):
+    - cron: "30 13 * * 1-5"   # 13:30 UTC = US pre-market / post-Asia-close → generate duel calls
+    - cron: "0 0 * * 2-6"     # 00:00 UTC = post-US-close → score outcomes + self-improve loop
+  workflow_dispatch: {}        # manual "Run workflow" button (on-demand)
+
+permissions:
+  contents: write              # allow the job to commit the updated SQLite state back
+
+concurrency:
+  group: surge-pipeline
+  cancel-in-progress: false    # never interrupt a run mid-write (DB integrity)
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # NO LLM. The daily pipeline is 100% deterministic — keep ANTHROPIC empty so nothing
+      # ever reaches for a paid model (a leftover value also breaks the gateway; see CLAUDE.md).
+      SURGE_ANTHROPIC_API_KEY: ""
+      # Token-free data sources. Add each in: repo → Settings → Secrets and variables → Actions.
+      SURGE_FINNHUB_API_KEY:      ${{ secrets.SURGE_FINNHUB_API_KEY }}
+      SURGE_ALPHAVANTAGE_API_KEY: ${{ secrets.SURGE_ALPHAVANTAGE_API_KEY }}
+      SURGE_NAVER_CLIENT_ID:      ${{ secrets.SURGE_NAVER_CLIENT_ID }}
+      SURGE_NAVER_CLIENT_SECRET:  ${{ secrets.SURGE_NAVER_CLIENT_SECRET }}
+      SURGE_OPENDART_API_KEY:     ${{ secrets.SURGE_OPENDART_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (core + KR extra; NO llm extra ⇒ no anthropic, stays token-free)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[kr]"    # [kr]=finance-datareader+pykrx for rotation; omit [llm]
+
+      - name: Run the deterministic daily pipeline
+        # set +e: one slow/throttled vendor must not abort the rest — the pipeline is
+        # degrade-safe by design (CLAUDE.md §7). Each command no-ops if its inputs aren't ready.
+        run: |
+          set +e
+          surge init
+          surge snapshot
+          surge backfill-outcomes
+          surge duel --pair all
+          surge rotation
+          surge rotation-eval
+          surge daily            # score → evolve → judge → record (learning_log)
+          exit 0
+
+      - name: Commit the updated state back to the repo
+        run: |
+          git config user.name  "surge-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A data 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no data changes this run"
+          else
+            git commit -m "chore(data): pipeline run $(date -u +'%Y-%m-%dT%H:%MZ')"
+            git push
+          fi
+
+  # PHASE 2 (designed in docs/MIGRATION_GITHUB_ACTIONS.md, not yet wired): a `pages` job that
+  # exports the dashboard's /api/* responses to static JSON + a static index.html and publishes
+  # via GitHub Pages, so anyone with the repo's Pages URL can verify the daily results read-only.

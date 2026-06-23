@@ -1,0 +1,92 @@
+# surge — local-first deployment.
+#
+# `app` (HTS dashboard + trading platform) uses POSTGRES here (SURGE_PG_DSN is
+# set below, which activates the Postgres backend in src/surge/db.py). Redis is
+# provisioned for the cache/queue step. To run on SQLite instead, comment out
+# SURGE_PG_DSN (state then lives in the surge_data volume).
+#
+#   docker compose up -d --build      # start
+#   docker compose run --rm app surge snapshot --fast   # one-off CLI job
+#   docker compose logs -f app
+
+services:
+  app:
+    build: .
+    image: surge:latest
+    ports:
+      - "8000:8000"
+    environment:
+      SURGE_DB_PATH: /app/data/surge.db
+      SURGE_TRADING_MODE: ${SURGE_TRADING_MODE:-paper}
+      SURGE_STARTING_CAPITAL: ${SURGE_STARTING_CAPITAL:-100000}
+      # Wired for the migration; unused until the persistence layer moves to PG:
+      SURGE_PG_DSN: postgresql://surge:surge@postgres:5432/surge
+      SURGE_REDIS_URL: redis://redis:6379/0
+      SURGE_SEC_USER_AGENT: ${SURGE_SEC_USER_AGENT:-surge/0.1 ops@example.com}
+    volumes:
+      - surge_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: surge
+      POSTGRES_PASSWORD: surge
+      POSTGRES_DB: surge
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U surge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  surge_data:
+  pg_data:
+  prom_data:
+  grafana_data:
