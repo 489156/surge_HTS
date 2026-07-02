@@ -300,6 +300,8 @@ CREATE TABLE IF NOT EXISTS duel_decisions (
     target_price  REAL,
     reasons       TEXT,                  -- human-readable component lines (JSON)
     components    TEXT,                  -- structured [{name,value,weight}] JSON
+    gap_guard     REAL,                  -- cancel-entry gap threshold (return units)
+    model         TEXT DEFAULT 'champion', -- engine that produced the call
     -- realized outcome (filled by duel-eval after the session)
     entry_fill    REAL,
     exit_fill     REAL,

@@ -663,18 +663,54 @@ def _cmd_duel_backtest(args) -> int:
     pair_ids = list(PAIRS) if args.pair == "all" else [args.pair]
     rc = 0
     for pid in pair_ids:
-        rc = max(rc, _duel_backtest_one(duel_bt, pid, args))
+        rc = max(rc, (_duel_compare_one if args.compare
+                      else _duel_backtest_one)(duel_bt, pid, args))
     return rc
 
 
+def _duel_compare_one(duel_bt, pair_id: str, args) -> int:
+    res = duel_bt.compare(period=args.period, pair_id=pair_id,
+                          offline=args.offline)
+    first = next(iter(res.values()))
+    if "error" in first:
+        print(f"  [{pair_id}] {first['error']}")
+        return 1
+    print(f"\n  Duel 2×2 비교 [{pair_id}] ({args.period}) — 동일 구간, "
+          "adaptive는 전 구간 아웃오브샘플")
+    print(f"  {'구성':<16} {'베팅':>5} {'관망':>5} {'가드':>5} "
+          f"{'적중률':>7} {'z':>6} {'수익':>8} {'Sharpe':>7}")
+    for name, r in res.items():
+        if "error" in r:
+            print(f"  {name:<16} {r['error']}")
+            continue
+        m = r["metrics"]
+        print(f"  {name:<16} {r['n_traded']:>5} {r['n_abstain']:>5} "
+              f"{r['n_gap_guard']:>5} {r['accuracy']*100:>6.1f}% "
+              f"{r['z_vs_coin']:>+6.2f} {m['total_return']*100:>+7.1f}% "
+              f"{m['sharpe']:>7.2f}")
+        if r["n_gap_guard"]:
+            ba = r["guard_blocked_accuracy"]
+            print(f"  {'':<16} └ 가드 차단 {r['n_gap_guard']}건: 차단된 트레이드"
+                  f" 적중률 {ba*100:.0f}% · would-have 합산 "
+                  f"{r['guard_blocked_pnl_sum']*100:+.1f}%")
+    print()
+    return 0
+
+
 def _duel_backtest_one(duel_bt, pair_id: str, args) -> int:
-    res = duel_bt.run(period=args.period, pair_id=pair_id, offline=args.offline)
+    res = duel_bt.run(period=args.period, pair_id=pair_id, offline=args.offline,
+                      mode="adaptive" if args.adaptive else "static",
+                      gap_guard_z=args.gap_guard)
     if "error" in res:
         print(f"  [{pair_id}] {res['error']}")
         return 1
     m = res["metrics"]
-    print(f"\n  Duel 백테스트 [{pair_id}] ({args.period})  {res['n_days']}일 중 "
-          f"{res['n_traded']}일 베팅 / {res['n_abstain']}일 관망")
+    mode_tag = " · adaptive(전진 OOS)" if res["mode"] == "adaptive" else ""
+    guard_tag = (f" · 갭가드 {res['n_gap_guard']}건 차단"
+                 if res.get("n_gap_guard") else "")
+    print(f"\n  Duel 백테스트 [{pair_id}] ({args.period}{mode_tag})  "
+          f"{res['n_days']}일 중 "
+          f"{res['n_traded']}일 베팅 / {res['n_abstain']}일 관망{guard_tag}")
     print(f"  방향 적중률: {res['accuracy']*100:.1f}%  "
           f"(동전던지기 대비 z={res['z_vs_coin']:+.2f})")
     if res.get("accuracy_full_size") is not None:
@@ -1090,6 +1126,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--pair", default="soxl_soxs", help=_pair_help)
     sp.add_argument("--offline", action="store_true",
                     help="use the price_history archive instead of live fetch")
+    sp.add_argument("--adaptive", action="store_true",
+                    help="walk-forward learned weights (every call out-of-sample)")
+    sp.add_argument("--gap-guard", type=float, default=None, metavar="Z",
+                    help="cancel-at-open gap guard σ (0=off; default=production)")
+    sp.add_argument("--compare", action="store_true",
+                    help="2×2 verdict: static/adaptive × guard off/on")
     sp.set_defaults(func=_cmd_duel_backtest)
 
     sub.add_parser("duel-eval", help="score past duel calls vs what happened"

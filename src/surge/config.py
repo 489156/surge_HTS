@@ -119,6 +119,22 @@ class Settings(BaseSettings):
     duel_target_atr: float = 1.5           # target = entry + k·ATR14 (R:R 1.5)
     duel_size_pct: float = 0.10            # max notional fraction per night (3x ETF)
     duel_slippage_bps: float = 2.0         # SOXL/SOXS are ultra-liquid (≈1c spread)
+    # Gap guard — committed cancel-at-open condition: if the underlying's open
+    # gap is already ≥ z·σ20 IN the call's direction, do not enter (선반영 가설).
+    # DEFAULT OFF (0): the full-archive replay REJECTED the hypothesis — trades
+    # a 1σ same-direction gap would have blocked hit 59% with large positive
+    # would-have PnL (gaps continue intraday more than they fade). The machinery
+    # stays (duel-backtest --gap-guard Z measures it) but production won't act
+    # on a refuted hypothesis. Do NOT flip the sign in-sample either.
+    duel_gap_guard_z: float = 0.0
+    # Adaptive (walk-forward learned weights; see duel/adaptive.py). Runs as a
+    # SHADOW variant every night; flips the production path only when a human
+    # sets SURGE_DUEL_USE_ADAPTIVE=1 after the forward record earns it.
+    duel_use_adaptive: bool = False
+    duel_adaptive_min_train: int = 120     # sessions before the learner may speak
+    duel_adaptive_ridge: float = 4.0       # L2 shrinkage (9 features, ±1 labels)
+    duel_adaptive_band: float = 0.06       # |2p−1| below this → STAND_ASIDE
+    duel_adaptive_full: float = 0.20       # |2p−1| at/above this → full size
     # Shadow-variant A/B → promotion gate (forward, leak-free)
     variant_min_n: int = 30                # min independent scored days to judge
     variant_promote_z: float = 1.64        # one-sided 95% proportion z vs champion

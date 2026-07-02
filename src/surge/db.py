@@ -169,6 +169,11 @@ def _migrate_sqlite(conn: sqlite3.Connection) -> None:
     if cols and "components" not in cols:
         conn.execute("ALTER TABLE duel_decisions ADD COLUMN components TEXT")
         logger.info("migrated duel_decisions: added components column")
+    if cols and "gap_guard" not in _cols():
+        conn.execute("ALTER TABLE duel_decisions ADD COLUMN gap_guard REAL")
+        conn.execute("ALTER TABLE duel_decisions "
+                     "ADD COLUMN model TEXT DEFAULT 'champion'")
+        logger.info("migrated duel_decisions: added gap_guard/model columns")
     rcols = [r[1] for r in
              conn.execute("PRAGMA table_info(rotation_decisions)").fetchall()]
     if rcols and "components" not in rcols:

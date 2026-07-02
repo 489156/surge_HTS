@@ -113,7 +113,19 @@ def prepare(frames: dict[str, pd.DataFrame], pair: dict | None = None,
         s["f_ret5"] = s["close"].pct_change(5).shift(1)
         s["f_vol20"] = ret.rolling(20).std().shift(1)
         s["f_sma50_dist"] = (s["close"] / s["close"].rolling(50).mean() - 1).shift(1)
-        s["oc_ret"] = s["close"] / s["open"] - 1  # LABEL ONLY (same-day)
+        # Intraday-aware features: the LABEL is open→close, but close→close
+        # features mix in the overnight gap. Decompose so the learner can see
+        # the intraday-only history separately (all shifted → D−1 knowledge).
+        oc = s["close"] / s["open"] - 1
+        gap = s["open"] / s["close"].shift(1) - 1
+        s["f_oc_mom5"] = oc.rolling(5).mean().shift(1)   # intraday-only momentum
+        s["f_oc1"] = oc.shift(1)                          # prior session intraday
+        s["f_gap1"] = gap.shift(1)                        # prior session's open gap
+        s["oc_ret"] = oc          # LABEL ONLY (same-day)
+        # gap_ret is same-day EXECUTION-time info: the open gap is realized at
+        # the moment the committed rule enters. Used ONLY by the gap guard —
+        # never as a decision feature (the call itself is committed pre-open).
+        s["gap_ret"] = gap
         out[und] = s
 
     if "^VIX" in frames:
@@ -153,7 +165,8 @@ def _base_ctx(pair: dict, date: str) -> dict:
     return {
         "date": date, "pair": pair, "underlying": pair["underlying"],
         "und_ret1": None, "und_ret5": None, "und_vol20": None,
-        "und_sma50_dist": None, "vix_level": None, "vix_chg": None,
+        "und_sma50_dist": None, "und_oc_mom5": None, "und_oc1": None,
+        "und_gap1": None, "vix_level": None, "vix_chg": None,
         "tnx_chg": None, "credit_chg": None, "dollar_chg": None,
         "bonds_chg": None, "asia": {}, "futures_ret": None, "atr_pct": {},
     }
@@ -175,6 +188,11 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
         und_ret1=float(row["f_ret1"]), und_ret5=float(row["f_ret5"]),
         und_vol20=float(row["f_vol20"]), und_sma50_dist=float(row["f_sma50_dist"]),
     )
+    for key, col in (("und_oc_mom5", "f_oc_mom5"), ("und_oc1", "f_oc1"),
+                     ("und_gap1", "f_gap1")):
+        v = row.get(col)
+        if v is not None and not pd.isna(v):
+            ctx[key] = float(v)
     vix = prepared.get("^VIX")
     if vix is not None and date in vix.index and not pd.isna(vix.loc[date, "f_level"]):
         ctx["vix_level"] = float(vix.loc[date, "f_level"])
@@ -219,6 +237,14 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
         und_vol20=float(rets.rolling(20).std().iloc[-1]),
         und_sma50_dist=float(closes.iloc[-1] / closes.rolling(50).mean().iloc[-1] - 1),
     )
+    oc = und["close"] / und["open"] - 1              # completed bars only
+    gap = und["open"] / und["close"].shift(1) - 1
+    if len(oc) >= 5 and not pd.isna(oc.iloc[-5:].mean()):
+        ctx["und_oc_mom5"] = float(oc.iloc[-5:].mean())
+    if not pd.isna(oc.iloc[-1]):
+        ctx["und_oc1"] = float(oc.iloc[-1])
+    if not pd.isna(gap.iloc[-1]):
+        ctx["und_gap1"] = float(gap.iloc[-1])
     vix = prepared.get("^VIX")
     if vix is not None and len(vix) >= 2:
         ctx["vix_level"] = float(vix["close"].iloc[-1])

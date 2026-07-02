@@ -19,7 +19,7 @@ from ..db import connect, utc_now
 from ..db import upsert as db_upsert
 from . import data as ddata
 from .backtest import simulate_bracket
-from .decide import DuelDecision, decide
+from .decide import DuelDecision, decide, decide_adaptive, guard_triggered
 
 ET = ZoneInfo("America/New_York")
 
@@ -99,6 +99,20 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     from . import factors, variants
 
     d = decide(ctx, entry_ref=refs, mult=variants.active_multipliers())
+
+    # Walk-forward adaptive engine: always a SHADOW row in the variant race;
+    # becomes the production call only behind the human gate (duel_use_adaptive).
+    try:
+        prob = _adaptive_prob(pair, ctx, d.components)
+    except Exception as exc:  # noqa: BLE001 — the learner must never break the call
+        logger.debug("adaptive shadow skipped for {}: {}", pair_id, exc)
+        prob = None
+    if prob is not None:
+        variants.capture_external("adaptive", pair, d.date, 2.0 * prob - 1.0)
+        if settings.duel_use_adaptive:
+            d = decide_adaptive(ctx, prob, entry_ref=refs,
+                                components=d.components)
+
     _persist(d)
     variants.capture(pair, d.date, d.components)   # shadow A/B (re-weight existing)
     factors.record(pair, d.date, ctx)              # shadow FACTORS ("what to add?")
@@ -117,6 +131,24 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     return d
 
 
+def _adaptive_prob(pair: dict, ctx: dict, components) -> float | None:
+    """Tonight's calibrated P(up) from the walk-forward learner, trained on the
+    price_history archive (kept current by the daily duel-archive job). Returns
+    None when the archive has fewer labeled sessions than min_train."""
+    from . import adaptive
+
+    frames = ddata.frames_from_archive(pair)
+    if not frames:
+        return None
+    prep = ddata.prepare(frames, pair)
+    _dates, X, y = adaptive.training_set(prep, pair)
+    model = adaptive.fit(X, y, settings.duel_adaptive_ridge,
+                         settings.duel_adaptive_min_train)
+    if model is None:
+        return None
+    return model.prob_up(adaptive.feature_vector(ctx, components))
+
+
 def _persist(d: DuelDecision) -> None:
     row = {
         "pair": d.pair_id,
@@ -128,6 +160,8 @@ def _persist(d: DuelDecision) -> None:
         "entry_ref": d.entry_ref,
         "stop_price": d.stop_price,
         "target_price": d.target_price,
+        "gap_guard": d.gap_guard,
+        "model": d.model,
         "reasons": json.dumps(d.reasons, ensure_ascii=False),
         "components": json.dumps(
             [{"name": c.name, "value": c.value, "weight": c.weight}
@@ -154,8 +188,9 @@ def eval_outcomes(frames: dict | None = None) -> dict:
     ).isoformat()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT pair, decision_date, side, stop_price, target_price "
-            "FROM duel_decisions WHERE evaluated_at IS NULL AND decision_date <= ?",
+            "SELECT pair, decision_date, side, stop_price, target_price, "
+            "gap_guard FROM duel_decisions "
+            "WHERE evaluated_at IS NULL AND decision_date <= ?",
             (scorable_through,),
         ).fetchall()
     pending = [dict(r) for r in rows]
@@ -200,6 +235,21 @@ def eval_outcomes(frames: dict | None = None) -> dict:
             updates: dict = {"evaluated_at": utc_now(), "soxx_oc_ret": label}
 
             if side in (pair["bull"], pair["bear"]) and label is not None:
+                # committed gap-guard condition, executed mechanically at the
+                # open: pre-priced signal → the rule did NOT enter.
+                gap = None
+                if "gap_ret" in und.columns and dte in und.index:
+                    g = und.loc[dte, "gap_ret"]
+                    gap = None if g != g else float(g)   # NaN-safe
+                if guard_triggered(side, pair, r["gap_guard"], gap):
+                    updates.update(exit_reason="gap_guard")
+                    with connect() as conn:
+                        sets = ", ".join(f"{k}=?" for k in updates)
+                        conn.execute(
+                            f"UPDATE duel_decisions SET {sets} "
+                            "WHERE pair=? AND decision_date=?",
+                            (*updates.values(), pid, dte))
+                    continue
                 f = prep.get(side)
                 if f is not None and dte in f.index:
                     bar = f.loc[dte]
