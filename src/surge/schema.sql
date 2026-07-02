@@ -314,6 +314,22 @@ CREATE TABLE IF NOT EXISTS duel_decisions (
     PRIMARY KEY (pair, decision_date)
 );
 
+-- ── Adaptive engine — nightly estimated variable weights (변인 추정 박제) ────
+-- One row per (pair, session, feature): the walk-forward learner's fitted
+-- weight the evening the call was committed. Point-in-time, never overwritten
+-- in spirit (captured_at is write-once) — the archaeological record of WHICH
+-- variables the data said mattered, and how that estimate drifted.
+CREATE TABLE IF NOT EXISTS adaptive_weights (
+    pair          TEXT NOT NULL,
+    decision_date TEXT NOT NULL,
+    feature       TEXT NOT NULL,
+    weight        REAL,
+    n_train       INTEGER,
+    captured_at   TEXT NOT NULL,
+    PRIMARY KEY (pair, decision_date, feature)
+);
+CREATE INDEX IF NOT EXISTS idx_aw_pair_date ON adaptive_weights(pair, decision_date);
+
 -- ── Secured price history — the duel research archive ───────────────────────
 -- Daily bars for every pair leg/underlying + macro/Asia series, persisted so
 -- backtests and research never depend on a live vendor being up.

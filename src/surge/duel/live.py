@@ -100,18 +100,18 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
 
     d = decide(ctx, entry_ref=refs, mult=variants.active_multipliers())
 
-    # Walk-forward adaptive engine: always a SHADOW row in the variant race;
-    # becomes the production call only behind the human gate (duel_use_adaptive).
+    # Walk-forward adaptive engine: every CONFIG races as a SHADOW row (the
+    # estimator itself is a hypothesis); the base config's fitted weights are
+    # archived nightly (변인 추정 박제). Production flips only behind the human
+    # gate (duel_use_adaptive).
     try:
-        prob = _adaptive_prob(pair, ctx, d.components)
+        prob = _adaptive_shadows(pair, ctx, d.components)
     except Exception as exc:  # noqa: BLE001 — the learner must never break the call
         logger.debug("adaptive shadow skipped for {}: {}", pair_id, exc)
         prob = None
-    if prob is not None:
-        variants.capture_external("adaptive", pair, d.date, 2.0 * prob - 1.0)
-        if settings.duel_use_adaptive:
-            d = decide_adaptive(ctx, prob, entry_ref=refs,
-                                components=d.components)
+    if prob is not None and settings.duel_use_adaptive:
+        d = decide_adaptive(ctx, prob, entry_ref=refs,
+                            components=d.components)
 
     _persist(d)
     variants.capture(pair, d.date, d.components)   # shadow A/B (re-weight existing)
@@ -131,22 +131,36 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     return d
 
 
-def _adaptive_prob(pair: dict, ctx: dict, components) -> float | None:
-    """Tonight's calibrated P(up) from the walk-forward learner, trained on the
-    price_history archive (kept current by the daily duel-archive job). Returns
-    None when the archive has fewer labeled sessions than min_train."""
-    from . import adaptive
+def _adaptive_shadows(pair: dict, ctx: dict, components) -> float | None:
+    """Race EVERY adaptive config on tonight's context: one training-set build
+    from the price_history archive (kept current by the daily duel-archive
+    job), one shadow variant row per config, plus the base config's weight
+    trace. Returns the base config's calibrated P(up) — None when the archive
+    has fewer labeled sessions than min_train."""
+    from . import adaptive, variants
 
     frames = ddata.frames_from_archive(pair)
     if not frames:
         return None
     prep = ddata.prepare(frames, pair)
     _dates, X, y = adaptive.training_set(prep, pair)
-    model = adaptive.fit(X, y, settings.duel_adaptive_ridge,
-                         settings.duel_adaptive_min_train)
-    if model is None:
-        return None
-    return model.prob_up(adaptive.feature_vector(ctx, components))
+    feats = adaptive.feature_vector(ctx, components)
+
+    base_prob: float | None = None
+    for name in adaptive.CONFIGS:
+        try:
+            model = adaptive.fit_config(X, y, name)
+        except Exception as exc:  # noqa: BLE001 — one config must not kill the race
+            logger.debug("adaptive config {} skipped: {}", name, exc)
+            continue
+        if model is None:
+            continue
+        p = model.prob_up(feats)
+        variants.capture_external(name, pair, ctx["date"], 2.0 * p - 1.0)
+        if name == "adaptive":
+            base_prob = p
+            adaptive.record_weights(pair, ctx["date"], model)
+    return base_prob
 
 
 def _persist(d: DuelDecision) -> None:

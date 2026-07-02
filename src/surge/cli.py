@@ -698,9 +698,11 @@ def _duel_compare_one(duel_bt, pair_id: str, args) -> int:
 
 
 def _duel_backtest_one(duel_bt, pair_id: str, args) -> int:
+    cfg = getattr(args, "config", None)
     res = duel_bt.run(period=args.period, pair_id=pair_id, offline=args.offline,
-                      mode="adaptive" if args.adaptive else "static",
-                      gap_guard_z=args.gap_guard)
+                      mode="adaptive" if (args.adaptive or cfg) else "static",
+                      gap_guard_z=args.gap_guard,
+                      adaptive_config=cfg or "adaptive")
     if "error" in res:
         print(f"  [{pair_id}] {res['error']}")
         return 1
@@ -727,6 +729,82 @@ def _duel_backtest_one(duel_bt, pair_id: str, args) -> int:
         print("  신호별 IC(정보계수, 익일 SOXX 방향과의 상관):")
         for k, v in sorted(res["ic"].items(), key=lambda x: -abs(x[1])):
             print(f"   · {k:<16} {v:+.3f}")
+    print()
+    return 0
+
+
+def _cmd_adaptive(args) -> int:
+    """변인 추정 대시보드: 학습기가 현재 credit하는 변인 가중치, 그 드리프트,
+    그리고 '모델이 어떻게 배워야 하는가'(설정 레이스)의 전진/리플레이 성적."""
+    from .db import connect
+    from .duel import adaptive
+    from .duel.pairs import PAIRS
+
+    pair_ids = list(PAIRS) if args.pair == "all" else [args.pair]
+    unknown = [p for p in pair_ids if p not in PAIRS]
+    if unknown:
+        print(f"  알 수 없는 페어: {unknown} — 선택지: {', '.join(PAIRS)} 또는 all")
+        return 1
+
+    if args.replay:
+        from .duel import backtest as duel_bt
+        for pid in pair_ids:
+            res = duel_bt.race(period=args.period, pair_id=pid,
+                               offline=args.offline)
+            if "error" in res:
+                print(f"\n  [{pid}] {res['error']}")
+                continue
+            print(f"\n  적응 설정 레이스 [{pid}] — {res['n_sessions']}세션, "
+                  f"전량 아웃오브샘플 (항상-한방향 기준선 "
+                  f"{res['baseline_always']*100:.1f}%)")
+            print(f"  {'설정':<20} {'n':>6} {'적중률':>7} {'z(동전)':>8} "
+                  f"{'z(한방향)':>9}")
+            ranked = sorted(res["configs"].items(),
+                            key=lambda kv: -(kv[1]["accuracy"] or 0))
+            for name, s in ranked:
+                if s["accuracy"] is None:
+                    continue
+                print(f"  {name:<20} {s['n']:>6} {s['accuracy']*100:>6.1f}% "
+                      f"{s['z_vs_coin']:>+8.2f} {s['z_vs_always']:>+9.2f}")
+        print("\n  ※ 리플레이는 후보 선별용 — 최종 심판은 밤마다 쌓이는 전진"
+              " 기록(duel_variants)이다.\n")
+        return 0
+
+    shown = False
+    for pid in pair_ids:
+        cur = adaptive.weight_snapshot(pid)
+        if cur is None:
+            continue
+        shown = True
+        drift = adaptive.weight_drift(pid, back=args.back) or {}
+        d = drift.get("drift", {})
+        print(f"\n  변인 추정 [{pid}] — 학습기가 현재 credit하는 가중치"
+              f" (드리프트: {args.back}세션 전 대비)")
+        for feat in sorted(cur, key=lambda f: -abs(cur[f])):
+            dv = d.get(feat)
+            tag = f"  Δ{dv:+.3f}" if dv is not None else ""
+            flip = "  ⚠부호반전" if feat in (drift.get("sign_flips") or []) else ""
+            print(f"   · {feat:<18} {cur[feat]:+.3f}{tag}{flip}")
+    if not shown:
+        print("\n  변인 가중치 기록이 아직 없습니다 — 밤 콜(surge duel)이 돌 때마다"
+              " 박제됩니다 (price_history 아카이브에 min_train 이상의 세션 필요).")
+
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT variant, COUNT(*) n, "
+            "SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) wins "
+            "FROM duel_variants WHERE variant LIKE 'adaptive%' "
+            "AND evaluated_at IS NOT NULL AND correct IS NOT NULL "
+            "GROUP BY variant").fetchall()
+    if rows:
+        print("\n  설정 레이스 — 전진 기록 (라이브 채점 누적):")
+        for r in sorted(rows, key=lambda r: -((r["wins"] or 0) / r["n"])):
+            acc = (r["wins"] or 0) / r["n"]
+            print(f"   · {r['variant']:<20} n={r['n']:>4}  적중률 {acc*100:.1f}%")
+    else:
+        print("\n  설정 레이스 전진 기록 없음 — `surge duel` 야간 실행 + 익일"
+              " `surge duel-eval`이 쌓아갑니다."
+              " 과거 근거는 `surge adaptive --replay --offline`으로 확인.")
     print()
     return 0
 
@@ -1128,6 +1206,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="use the price_history archive instead of live fetch")
     sp.add_argument("--adaptive", action="store_true",
                     help="walk-forward learned weights (every call out-of-sample)")
+    sp.add_argument("--config", default=None,
+                    help="adaptive.CONFIGS entry to replay (implies --adaptive)")
     sp.add_argument("--gap-guard", type=float, default=None, metavar="Z",
                     help="cancel-at-open gap guard σ (0=off; default=production)")
     sp.add_argument("--compare", action="store_true",
@@ -1136,6 +1216,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("duel-eval", help="score past duel calls vs what happened"
                    ).set_defaults(func=_cmd_duel_eval)
+
+    sp = sub.add_parser("adaptive",
+                        help="변인 추정: learned weights, drift, config race")
+    sp.add_argument("--pair", default="all", help=_pair_help)
+    sp.add_argument("--back", type=int, default=20,
+                    help="drift comparison horizon in sessions (default 20)")
+    sp.add_argument("--replay", action="store_true",
+                    help="run the OOS config race over history (evidence, "
+                         "not the final judge)")
+    sp.add_argument("--offline", action="store_true",
+                    help="use the price_history archive instead of live fetch")
+    sp.add_argument("--period", default="2y", help="look-back for --replay")
+    sp.set_defaults(func=_cmd_adaptive)
 
     sub.add_parser("report", help="one-screen daily duel report"
                    ).set_defaults(func=_cmd_report)

@@ -113,10 +113,12 @@ def capture_external(name: str, pair: dict, date: str, score: float) -> None:
 def set_active(name: str) -> None:
     import json
 
-    if name == "adaptive":
+    if name.startswith("adaptive"):
         raise KeyError(
-            "'adaptive' is not a multiplier variant — promote it by setting "
-            "SURGE_DUEL_USE_ADAPTIVE=1 (human gate; see duel/adaptive.py)")
+            f"'{name}' is not a multiplier variant — the adaptive engine is "
+            "promoted by setting SURGE_DUEL_USE_ADAPTIVE=1 (human gate; a "
+            "non-base config wins by editing CONFIGS['adaptive']; see "
+            "duel/adaptive.py)")
     if name not in VARIANTS:
         raise KeyError(f"unknown variant '{name}' (choices: {list(VARIANTS)})")
     now = utc_now()

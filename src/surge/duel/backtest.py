@@ -49,25 +49,11 @@ def simulate_bracket(o: float, h: float, lo: float, c: float,
     return c * (1 - slip), "close"
 
 
-def run(period: str = "2y", frames: dict | None = None,
-        pair_id: str = "soxl_soxs", offline: bool = False,
-        mode: str = "static", gap_guard_z: float | None = None) -> dict:
-    """`gap_guard_z`: σ-multiple for the cancel-at-open guard (None → the
-    production setting; 0 disables). `mode`: static | adaptive."""
-    from .pairs import get_pair
-
-    pair = get_pair(pair_id)
-    if frames is None:
-        frames = (ddata.frames_from_archive(pair) if offline
-                  else ddata.fetch_frames(period, pair))
-    prep = ddata.prepare(frames, pair)
+def _collect_days(prep: dict, pair: dict) -> list[dict]:
+    """Chronological day records (ctx + label + same-day gap + entry refs) —
+    the shared replay substrate for run() and race()."""
     bull, bear = pair["bull"], pair["bear"]
-    soxx = prep.get(pair["underlying"])   # the underlying (label source)
-    if soxx is None or len(soxx) < 60:
-        return {"error": f"insufficient {pair['underlying']} data"}
-    guard_z = settings.duel_gap_guard_z if gap_guard_z is None else gap_guard_z
-
-    # ── pass 1: chronological day records (ctx + label + entry refs) ─────────
+    soxx = prep.get(pair["underlying"])
     days: list[dict] = []
     for date in soxx.index:
         ctx = ddata.context_for(prep, date, pair)
@@ -84,20 +70,50 @@ def run(period: str = "2y", frames: dict | None = None,
                 refs[leg] = float(f.loc[date, "open"])
         days.append({"date": date, "ctx": ctx, "label": float(label),
                      "gap": None if gap != gap else float(gap), "refs": refs})
+    return days
+
+
+def _feature_matrix(days: list[dict]) -> list[list[float]]:
+    from . import adaptive
+    from .signals import compute_signal
+
+    return [adaptive.feature_vector(
+                d["ctx"], compute_signal(d["ctx"])["components"])
+            for d in days]
+
+
+def run(period: str = "2y", frames: dict | None = None,
+        pair_id: str = "soxl_soxs", offline: bool = False,
+        mode: str = "static", gap_guard_z: float | None = None,
+        adaptive_config: str = "adaptive") -> dict:
+    """`gap_guard_z`: σ-multiple for the cancel-at-open guard (None → the
+    production setting; 0 disables). `mode`: static | adaptive (under the
+    named `adaptive_config` from adaptive.CONFIGS)."""
+    from .pairs import get_pair
+
+    pair = get_pair(pair_id)
+    if frames is None:
+        frames = (ddata.frames_from_archive(pair) if offline
+                  else ddata.fetch_frames(period, pair))
+    prep = ddata.prepare(frames, pair)
+    bull, bear = pair["bull"], pair["bear"]
+    soxx = prep.get(pair["underlying"])   # the underlying (label source)
+    if soxx is None or len(soxx) < 60:
+        return {"error": f"insufficient {pair['underlying']} data"}
+    guard_z = settings.duel_gap_guard_z if gap_guard_z is None else gap_guard_z
+
+    days = _collect_days(prep, pair)
 
     # ── adaptive pre-pass: strictly-prior-history P(up) per session ──────────
     probs: list[float | None] = [None] * len(days)
     if mode == "adaptive":
         from . import adaptive
-        from .signals import compute_signal
 
-        X = [adaptive.feature_vector(
-                d["ctx"], compute_signal(d["ctx"])["components"])
-             for d in days]
+        cfg = adaptive.resolve_config(adaptive_config)
         probs = adaptive.walk_forward_probs(
-            X, [d["label"] for d in days],
-            ridge_lambda=settings.duel_adaptive_ridge,
-            min_train=settings.duel_adaptive_min_train)
+            _feature_matrix(days), [d["label"] for d in days],
+            ridge_lambda=cfg["ridge_lambda"], min_train=cfg["min_train"],
+            window=cfg["window"], features=cfg["features"])
 
     slip = settings.duel_slippage_bps
     equity = settings.starting_capital
@@ -224,6 +240,53 @@ def run(period: str = "2y", frames: dict | None = None,
         "oracle_sum": oracle,
         "ic": ics,
     }
+
+
+def race(period: str = "2y", pair_id: str = "soxl_soxs",
+         offline: bool = False, frames: dict | None = None) -> dict:
+    """Replay the adaptive CONFIG race over history: one context collection,
+    one feature build, then a walk-forward per config. Directions are always
+    committed (variant-race semantics — no abstain band), every prediction
+    out-of-sample, so the table answers 'HOW should the model learn?' with
+    십수년 of evidence instead of an argument."""
+    from . import adaptive
+    from .pairs import get_pair
+
+    pair = get_pair(pair_id)
+    if frames is None:
+        frames = (ddata.frames_from_archive(pair) if offline
+                  else ddata.fetch_frames(period, pair))
+    prep = ddata.prepare(frames, pair)
+    if prep.get(pair["underlying"]) is None:
+        return {"error": f"insufficient {pair['underlying']} data"}
+    days = _collect_days(prep, pair)
+    if len(days) < 200:
+        return {"error": f"only {len(days)} usable sessions"}
+    X = _feature_matrix(days)
+    labels = [d["label"] for d in days]
+
+    ups = sum(1 for lab in labels if lab > 0)
+    baseline = max(ups, len(labels) - ups) / len(labels)   # always-bull/bear
+    out: dict = {"pair": pair_id, "n_sessions": len(days),
+                 "baseline_always": baseline, "configs": {}}
+    for name in adaptive.CONFIGS:
+        cfg = adaptive.resolve_config(name)
+        probs = adaptive.walk_forward_probs(
+            X, labels, ridge_lambda=cfg["ridge_lambda"],
+            min_train=cfg["min_train"], window=cfg["window"],
+            features=cfg["features"])
+        scored = [(p, lab) for p, lab in zip(probs, labels, strict=True)
+                  if p is not None]
+        n = len(scored)
+        wins = sum(1 for p, lab in scored if (p > 0.5) == (lab > 0))
+        acc = wins / n if n else None
+        z = ((wins - 0.5 * n) / math.sqrt(0.25 * n)) if n >= 30 else None
+        zb = ((wins - baseline * n)
+              / math.sqrt(max(baseline * (1 - baseline), 1e-9) * n)
+              if n >= 30 else None)
+        out["configs"][name] = {"n": n, "accuracy": acc, "z_vs_coin": z,
+                                "z_vs_always": zb}
+    return out
 
 
 def compare(period: str = "2y", pair_id: str = "soxl_soxs",

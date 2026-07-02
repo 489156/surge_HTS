@@ -123,6 +123,23 @@ def run_daily(write: bool = True) -> dict:
     _safe("evolve", learn.register_discovered, warnings)
     all_disc = sorted(_safe("discovered", learn.discovered_variants, warnings) or {})
 
+    # ── 2.5 변인 추정 — how the walk-forward learner's weight estimates moved ──
+    # (recorded nightly by the duel call; summarized here so learning_log keeps
+    # the archaeological trace of which variables the data currently credits)
+    def _variables() -> dict:
+        from .duel.adaptive import weight_drift
+        from .duel.pairs import PAIRS
+
+        out = {}
+        for pid in PAIRS:
+            w = weight_drift(pid)
+            if w:
+                out[pid] = {"top_drift": w["top_drift"],
+                            "sign_flips": w["sign_flips"],
+                            "current": w["current"]}
+        return out
+    variables = _safe("variables", _variables, warnings) or {}
+
     # ── 3. JUDGE — current evidence per strategy (the truth gate) ──
     strategies = _safe("verdict", V.assess, warnings) or []
     headline = _safe("headline", V.headline, warnings) or "—"
@@ -164,6 +181,7 @@ def run_daily(write: bool = True) -> dict:
         "evidence": evidence,
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed
+        "variables": variables,           # 변인 추정 드리프트 (adaptive weight trace)
         "cadence": cadence,               # freshness of duel/rotation/surge inputs
         "stale_inputs": stale_inputs,     # which (if any) appear to have a stalled schedule
         "warnings": warnings,

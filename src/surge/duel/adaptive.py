@@ -33,6 +33,39 @@ COMPONENT_FEATURES = ("asia_lead", "trend", "momentum_5d", "vix_regime",
 INTRADAY_FEATURES = ("oc_mom5", "oc1", "gap1")
 FEATURES = (*COMPONENT_FEATURES, *INTRADAY_FEATURES)
 
+# ── the learner's OWN hyperparameters as racing hypotheses ───────────────────
+# The recursive step: not only the factor weights but the *estimator itself*
+# (memory length, shrinkage, feature family) is a hypothesis. Every config
+# shadow-commits a direction nightly under its own variant name and the same
+# forward A/B scores them all — so "how should the model learn?" is settled by
+# accumulated forward evidence, never by an in-sample argument.
+# name → overrides of {ridge_lambda, min_train, window, features}
+CONFIGS: dict[str, dict] = {
+    "adaptive": {},                              # base: expanding, all features
+    "adaptive_roll2y": {"window": 500},          # only remember ~2y (regime drift)
+    "adaptive_roll4y": {"window": 1000},         # ~4y memory
+    "adaptive_tight": {"ridge_lambda": 16.0},    # heavier shrinkage
+    "adaptive_loose": {"ridge_lambda": 1.0},     # lighter shrinkage
+    "adaptive_intraday": {"features": INTRADAY_FEATURES},   # new variables only
+    "adaptive_votes": {"features": COMPONENT_FEATURES},     # legacy votes only
+}
+
+
+def resolve_config(name: str) -> dict:
+    """CONFIGS entry + production defaults → concrete parameters."""
+    from ..config import settings
+
+    if name not in CONFIGS:
+        raise KeyError(f"unknown adaptive config '{name}' "
+                       f"(choices: {list(CONFIGS)})")
+    cfg = CONFIGS[name]
+    return {
+        "ridge_lambda": cfg.get("ridge_lambda", settings.duel_adaptive_ridge),
+        "min_train": cfg.get("min_train", settings.duel_adaptive_min_train),
+        "window": cfg.get("window"),
+        "features": tuple(cfg.get("features", FEATURES)),
+    }
+
 
 def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
@@ -97,36 +130,105 @@ def fit_platt(scores: np.ndarray, y01: np.ndarray, iters: int = 25,
 
 
 class AdaptiveModel:
-    """One fitted (ridge + Platt) snapshot; predicts calibrated P(up)."""
+    """One fitted (ridge + Platt) snapshot; predicts calibrated P(up).
+    `features` records which (ordered) subset of FEATURES it was trained on."""
 
-    def __init__(self, w: np.ndarray, platt: tuple[float, float], n_train: int):
+    def __init__(self, w: np.ndarray, platt: tuple[float, float], n_train: int,
+                 features: tuple[str, ...] = FEATURES):
         self.w = w
         self.platt = platt
         self.n_train = n_train
+        self.features = features
+        self._idx = [FEATURES.index(f) for f in features]
 
     def prob_up(self, feats: list[float]) -> float:
-        s = float(_ridge_score(np.asarray([feats], dtype=float), self.w)[0])
+        sub = [feats[i] for i in self._idx]
+        s = float(_ridge_score(np.asarray([sub], dtype=float), self.w)[0])
         a, b = self.platt
         return float(1.0 / (1.0 + math.exp(-max(-30, min(30, a * s + b)))))
 
     @property
     def weights(self) -> dict[str, float]:
         return {n: round(float(v), 4)
-                for n, v in zip(FEATURES, self.w[:-1], strict=False)}
+                for n, v in zip(self.features, self.w[:-1], strict=False)}
 
 
 def fit(X: list[list[float]], labels: list[float], ridge_lambda: float = 4.0,
-        min_train: int = 120) -> AdaptiveModel | None:
+        min_train: int = 120, window: int | None = None,
+        features: tuple[str, ...] = FEATURES) -> AdaptiveModel | None:
     """Fit one snapshot on (features, realized open→close) history.
-    Returns None when there is not enough labeled history to trust."""
+    `window` trains on only the most recent N sessions (regime-drift
+    hypothesis); `features` on a subset of the full vector. Returns None when
+    there is not enough labeled history to trust."""
     if len(X) < min_train:
         return None
+    if window:
+        X, labels = X[-window:], labels[-window:]
     Xa = np.asarray(X, dtype=float)
+    if features != FEATURES:
+        idx = [FEATURES.index(f) for f in features]
+        Xa = Xa[:, idx]
     ya = np.sign(np.asarray(labels, dtype=float))
     ya[ya == 0] = 1.0                         # flat day counts as up (rare)
     w = fit_ridge(Xa, ya, ridge_lambda)
     platt = fit_platt(_ridge_score(Xa, w), (ya > 0).astype(float))
-    return AdaptiveModel(w, platt, len(X))
+    return AdaptiveModel(w, platt, len(Xa), features)
+
+
+def fit_config(X: list[list[float]], labels: list[float],
+               config: str = "adaptive") -> AdaptiveModel | None:
+    """fit() under a named CONFIGS entry (production defaults filled in)."""
+    c = resolve_config(config)
+    return fit(X, labels, ridge_lambda=c["ridge_lambda"],
+               min_train=c["min_train"], window=c["window"],
+               features=c["features"])
+
+
+# ── 변인 추정 박제 — the nightly weight trace ─────────────────────────────────
+def record_weights(pair: dict, date: str, model: AdaptiveModel) -> int:
+    """Persist the base config's fitted per-feature weights for one (pair,
+    session). This is the 변인 추정 record: over months it shows which
+    variables the data kept voting for, which faded, and which flipped sign —
+    evidence that accumulates instead of an argument that repeats."""
+    from ..db import connect, upsert, utc_now
+
+    now = utc_now()
+    rows = [{"pair": pair["id"], "decision_date": date, "feature": name,
+             "weight": w, "n_train": model.n_train, "captured_at": now}
+            for name, w in model.weights.items()]
+    with connect() as conn:
+        upsert(conn, "adaptive_weights", rows, immutable=("captured_at",))
+    return len(rows)
+
+
+def weight_snapshot(pair_id: str, back: int = 0) -> dict[str, float] | None:
+    """The recorded weight vector `back` distinct sessions ago (0 = latest)."""
+    from ..db import connect
+
+    with connect() as conn:
+        dates = [r["decision_date"] for r in conn.execute(
+            "SELECT DISTINCT decision_date FROM adaptive_weights WHERE pair=? "
+            "ORDER BY decision_date DESC LIMIT ?", (pair_id, back + 1))]
+        if len(dates) <= back:
+            return None
+        rows = conn.execute(
+            "SELECT feature, weight FROM adaptive_weights "
+            "WHERE pair=? AND decision_date=?", (pair_id, dates[back])).fetchall()
+    return {r["feature"]: r["weight"] for r in rows}
+
+
+def weight_drift(pair_id: str, back: int = 20) -> dict | None:
+    """Latest vs `back`-sessions-ago weights → per-feature drift, sorted by
+    magnitude. None until two snapshots exist that far apart."""
+    cur, old = weight_snapshot(pair_id, 0), weight_snapshot(pair_id, back)
+    if cur is None or old is None:
+        return None
+    drift = {f: round(cur[f] - old[f], 4) for f in cur if f in old}
+    flips = [f for f in drift
+             if cur.get(f) and old.get(f) and (cur[f] > 0) != (old[f] > 0)]
+    return {"current": cur, "previous": old, "drift": drift,
+            "sign_flips": sorted(flips),
+            "top_drift": sorted(drift, key=lambda f: -abs(drift[f]))[:3]}
 
 
 def training_set(prep: dict, pair: dict,
@@ -159,17 +261,21 @@ def training_set(prep: dict, pair: dict,
 
 def walk_forward_probs(X: list[list[float]], labels: list[float],
                        ridge_lambda: float = 4.0, min_train: int = 120,
-                       refit_every: int = 5) -> list[float | None]:
+                       refit_every: int = 5, window: int | None = None,
+                       features: tuple[str, ...] = FEATURES,
+                       ) -> list[float | None]:
     """P(up) for each session using ONLY strictly-prior sessions (expanding
-    window). `None` until `min_train` history exists. Refits every
-    `refit_every` sessions (closed-form is cheap; 5 keeps long replays fast
-    without letting the model go stale)."""
+    window, or the trailing `window` sessions when set). `None` until
+    `min_train` history exists. Refits every `refit_every` sessions
+    (closed-form is cheap; 5 keeps long replays fast without letting the
+    model go stale)."""
     out: list[float | None] = []
     model: AdaptiveModel | None = None
     fitted_at = -1
     for i in range(len(X)):
         if i >= min_train and (model is None or i - fitted_at >= refit_every):
-            model = fit(X[:i], labels[:i], ridge_lambda, min_train)
+            model = fit(X[:i], labels[:i], ridge_lambda, min_train,
+                        window=window, features=features)
             fitted_at = i
         out.append(model.prob_up(X[i]) if model is not None else None)
     return out

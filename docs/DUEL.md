@@ -184,12 +184,48 @@ uv run surge duel-eval         # 지난 콜 사후 채점 → 누적 적중률
 부호를 뒤집어 "갭 확인 필터"로 쓰고 싶은 유혹이 곧 인샘플 과적합이므로
 하지 않는다. 기계는 남겨서 누구든 재측정할 수 있다.
 
+### 재귀적 자기개선 계층 (2026-07-02 확장) — "변인 추정"의 기계화
+
+전제: 완벽한 예측은 없다. 대신 **예측→적중 분석을 십수년 아카이브와 매일 밤의
+현재 데이터로 반복**하면 변인(어떤 정보가 익일 방향을 움직이는가)의 추정이
+누적되고, 그 추정 과정 자체가 기록·검증·개선된다. 이를 세 겹으로 기계화:
+
+1. **추정기 자체가 가설** (`adaptive.CONFIGS`): 기억 길이(expanding vs 2y/4y
+   롤링), 수축 강도(λ 1/4/16), 변인 가족(전체/투표만/인트라데이만) 7종 설정이
+   매일 밤 *각자* 방향을 섀도 커밋하고 동일 전진 A/B에서 채점된다. "모델이
+   어떻게 배워야 하는가"를 논쟁이 아니라 누적 증거가 결정.
+2. **변인 가중치 박제** (`adaptive_weights` 테이블): 기본 설정 학습기가 매일
+   밤 적합한 피처별 가중치를 point-in-time 저장. `surge adaptive`가 현재
+   credit되는 변인·드리프트·부호반전을 보여주고, `surge daily`의
+   learning_log에 요약이 남는다 — 변인 추정의 고고학적 기록.
+3. **변인의 독립 심판** (shadow factors): 인트라데이 분해 변인 3종
+   (intraday_mom·prev_gap_follow·prev_intraday_follow)이 학습기 내부뿐
+   아니라 단독 팩터 레이스에도 등록 — 학습기가 credit하는 변인이 단독으로도
+   전진 예측력이 있는지 교차 검증.
+
+**16년 리플레이 설정 레이스** (전량 OOS, 항상-커밋, `surge adaptive --replay --offline`):
+
+| 설정 | SOXL/SOXS | TQQQ/SQQQ | TECL/TECS |
+|---|---|---|---|
+| adaptive(기본) | 51.3% (z=+2.0) | **53.2% (z=+5.2)** | 51.9% (z=+3.2) |
+| adaptive_roll4y | **52.0% (z=+3.1)** | **53.2% (z=+5.2)** | 51.9% (z=+3.1) |
+| adaptive_intraday | 50.7% | 52.9% | **53.2% (z=+5.3)** |
+| adaptive_roll2y | 51.4% | 51.2% | 51.6% |
+
+정직한 판독: **보편 승자는 없다** — 반도체는 4년 기억, 나스닥은 긴 기억,
+기술셀렉트는 인트라데이 변인이 우세하고, 2년 기억(roll2y)만 일관되게 열세다.
+리플레이가 후보를 좁히고, 최종 결정은 밤마다 쌓이는 전진 기록이 내린다 —
+이것이 과적합 없이 개선이 *생성*되는 재귀 구조다.
+
 ### 사용법 + 승격 경로
 
 ```bash
 uv run surge duel-backtest --offline --compare        # 2×2 verdict 테이블
 uv run surge duel-backtest --offline --adaptive       # 적응 엔진 단독
+uv run surge duel-backtest --offline --config adaptive_roll4y  # 특정 설정
 uv run surge duel-backtest --offline --gap-guard 1.0  # 가드 재측정
+uv run surge adaptive                                 # 변인 가중치 + 드리프트 + 레이스
+uv run surge adaptive --replay --offline              # 16y OOS 설정 레이스
 ```
 
 - 매일 밤 `surge duel`이 적응 엔진의 콜을 **섀도 변형 `adaptive`**로

@@ -100,6 +100,34 @@ def _bond_bid(ctx: dict) -> float | None:
     return None if b is None else _clip(math.tanh(b / 0.006))
 
 
+def _intraday_mom(ctx: dict) -> float | None:
+    """Intraday-only momentum CONTINUATION: the label is open→close, so the
+    hypothesis is that recent intraday behavior (gap excluded) persists —
+    distinct from momentum_5d, which mixes overnight gaps into the read."""
+    v, vol = ctx.get("und_oc_mom5"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / (vol / math.sqrt(5)) / 1.5))
+
+
+def _prev_gap_follow(ctx: dict) -> float | None:
+    """Prior session's open gap FOLLOWED the next day (information arrival
+    persists) — the standalone forward test of the gap-continuation read that
+    the gap-guard replay surfaced."""
+    v, vol = ctx.get("und_gap1"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / vol / 1.5))
+
+
+def _prev_intraday_follow(ctx: dict) -> float | None:
+    """Prior session's intraday (open→close) leg continues the next session."""
+    v, vol = ctx.get("und_oc1"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / vol / 1.5))
+
+
 CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "asia_breadth": _asia_breadth,
     "und_accel": _und_accel,
@@ -108,6 +136,11 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "credit_risk": _credit_risk,
     "dollar_drag": _dollar_drag,
     "bond_bid": _bond_bid,
+    # intraday decomposition variables (feed the adaptive learner too) — their
+    # STANDALONE forward records accumulate here (변인 추정의 독립 심판)
+    "intraday_mom": _intraday_mom,
+    "prev_gap_follow": _prev_gap_follow,
+    "prev_intraday_follow": _prev_intraday_follow,
 }
 
 _MIN_CONVICTION = 0.05   # |value| below this = no directional call (not scored)

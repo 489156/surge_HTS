@@ -338,3 +338,123 @@ def test_set_active_rejects_adaptive_with_guidance():
 
     with pytest.raises(KeyError, match="SURGE_DUEL_USE_ADAPTIVE"):
         variants.set_active("adaptive")
+    with pytest.raises(KeyError, match="SURGE_DUEL_USE_ADAPTIVE"):
+        variants.set_active("adaptive_roll4y")   # any config name
+
+
+# ── config registry (the estimator itself as a hypothesis) ──────────────────
+def test_resolve_config_defaults_and_unknown():
+    c = adaptive.resolve_config("adaptive")
+    assert c["ridge_lambda"] == settings.duel_adaptive_ridge
+    assert c["window"] is None and c["features"] == adaptive.FEATURES
+    r = adaptive.resolve_config("adaptive_roll2y")
+    assert r["window"] == 500
+    with pytest.raises(KeyError, match="unknown adaptive config"):
+        adaptive.resolve_config("nope")
+
+
+def test_fit_rolling_window_and_feature_subset():
+    rng = np.random.default_rng(5)
+    n = 400
+    X = rng.normal(size=(n, len(adaptive.FEATURES))).clip(-1, 1).tolist()
+    labels = [0.01 * x[0] for x in X]
+    m = adaptive.fit(X, labels, min_train=120, window=200)
+    assert m is not None and m.n_train == 200        # trained on the tail only
+
+    sub = adaptive.INTRADAY_FEATURES
+    ms = adaptive.fit(X, labels, min_train=120, features=sub)
+    assert ms is not None
+    assert tuple(ms.weights) == sub                  # subset weights only
+    assert isinstance(ms.prob_up(X[0]), float)       # full vector still accepted
+
+
+def test_config_race_replay_learns_on_synthetic(monkeypatch):
+    monkeypatch.setattr(settings, "duel_adaptive_min_train", 40)
+    res = dbt.race(frames=_frames(n=260))
+    assert res["n_sessions"] > 200
+    accs = {n: s["accuracy"] for n, s in res["configs"].items()
+            if s["accuracy"] is not None}
+    assert accs                                       # every config raced
+    # the perfect Asia lead is learnable by every config that sees the votes
+    assert accs["adaptive"] > 0.9
+    assert accs["adaptive_votes"] > 0.9
+
+
+# ── 변인 추정 박제 (weight trace) ─────────────────────────────────────────────
+def test_record_weights_snapshot_and_drift(tmp_path, monkeypatch):
+    db = tmp_path / "w.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+
+    rng = np.random.default_rng(9)
+    X = rng.normal(size=(200, len(adaptive.FEATURES))).clip(-1, 1).tolist()
+    labels = [0.01 * x[0] for x in X]
+    m = adaptive.fit(X, labels, min_train=120)
+    for i, day in enumerate(["2026-06-01", "2026-06-02", "2026-06-03"]):
+        # perturb one weight so drift is observable
+        m.w[0] = 1.0 + i
+        adaptive.record_weights(PAIR, day, m)
+
+    cur = adaptive.weight_snapshot("soxl_soxs")
+    assert cur is not None and set(cur) == set(adaptive.FEATURES)
+    assert cur[adaptive.FEATURES[0]] == pytest.approx(3.0)
+    old = adaptive.weight_snapshot("soxl_soxs", back=2)
+    assert old[adaptive.FEATURES[0]] == pytest.approx(1.0)
+    d = adaptive.weight_drift("soxl_soxs", back=2)
+    assert d["drift"][adaptive.FEATURES[0]] == pytest.approx(2.0)
+    assert adaptive.FEATURES[0] in d["top_drift"]
+    assert adaptive.weight_drift("soxl_soxs", back=10) is None  # not enough yet
+
+
+def test_tonight_races_all_configs_and_traces_weights(tmp_path, monkeypatch):
+    db = tmp_path / "r.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_adaptive_min_train", 40)
+
+    frames = _frames(n=200, lead=+1)
+
+    def fake_download(syms, period="max"):
+        sym = syms[0]
+        key = {"2330.TW": "TSMC"}.get(sym, sym)
+        if key in frames:
+            df = frames[key].copy()
+            df["symbol"] = sym
+            return df
+        return pd.DataFrame()
+    monkeypatch.setattr(duel_data.market, "download_ohlcv", fake_download)
+    duel_data.archive(period="max")
+
+    last = frames["SOXX"]["date"].iloc[-1]
+    dlive.tonight(frames=frames, with_futures=False, session_date=last)
+
+    with connect(db) as conn:
+        names = {r["variant"] for r in conn.execute(
+            "SELECT DISTINCT variant FROM duel_variants "
+            "WHERE variant LIKE 'adaptive%'")}
+        wrows = conn.execute(
+            "SELECT COUNT(*) n FROM adaptive_weights").fetchone()["n"]
+    assert names == set(adaptive.CONFIGS)          # every config raced
+    assert wrows == len(adaptive.FEATURES)         # base weights archived
+
+
+# ── intraday variables in the standalone factor race ─────────────────────────
+def test_intraday_candidate_factors_fire():
+    from surge.duel.factors import CANDIDATE_FACTORS
+
+    ctx = {"und_vol20": 0.02, "und_oc_mom5": 0.01, "und_oc1": -0.02,
+           "und_gap1": 0.015}
+    assert CANDIDATE_FACTORS["intraday_mom"](ctx) > 0
+    assert CANDIDATE_FACTORS["prev_intraday_follow"](ctx) < 0
+    assert CANDIDATE_FACTORS["prev_gap_follow"](ctx) > 0
+    assert CANDIDATE_FACTORS["intraday_mom"]({"und_vol20": 0.02}) is None
+
+
+def test_daily_report_includes_variables(tmp_path, monkeypatch):
+    db = tmp_path / "d.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    from surge.daily import run_daily
+
+    report = run_daily(write=False)
+    assert "variables" in report               # 변인 추정 trace in learning_log
