@@ -267,9 +267,13 @@ def _nvda_frames(n=200, lead=+1):
     }
 
 
-def test_nvdl_nvd_backtest_and_live_call_flow():
+def test_nvdl_nvd_backtest_and_live_call_flow(tmp_path, monkeypatch):
     """End-to-end proof the pipeline is registry-driven, not hardcoded to the
     original pairs: 2x (not 3x) legs, no basket, single-stock underlying."""
+    db = tmp_path / "nvdl.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+
     res = dbt.run(frames=_nvda_frames(), pair_id="nvdl_nvd", gap_guard_z=0)
     assert res["bull"] == "NVDL" and res["bear"] == "NVD"
     assert res["n_traded"] > 10
