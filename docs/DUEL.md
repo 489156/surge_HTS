@@ -1,6 +1,6 @@
 # Duel — 매일 밤 레버리지/인버스 페어 판정 엔진
 
-## 페어 레지스트리 (2026-06-11 확장)
+## 페어 레지스트리 (2026-07-03 확장)
 
 | pair_id | 불 / 베어 | 기초지수 | 성격 |
 |---|---|---|---|
@@ -8,11 +8,40 @@
 | tqqq_sqqq | TQQQ / SQQQ | QQQ | 나스닥100 3x |
 | tecl_tecs | TECL / TECS | XLK | 기술 셀렉트 3x |
 | labu_labd | LABU / LABD | XBI | 바이오텍 3x (**연구 전용** — 아래 참조) |
+| tna_tza | TNA / TZA | IWM | 러셀2000 소형주 3x (분산용) |
+| fas_faz | FAS / FAZ | XLF | 금융 3x (분산용) |
+| nvdl_nvd | NVDL / NVD | NVDA | 엔비디아 2x (**단일종목 예외** — 아래 참조) |
 
-단일주식 2x(NVDL 등)는 제외: 라벨이 지수가 아니고 인버스 다리 유동성이 약함.
-`surge duel --pair all` 이 4페어 카드를 한 번에 출력·저장. 콜은 `(pair, 날짜)` 키로
+원칙적으로 단일주식 2x는 제외(라벨이 지수가 아니고 통상 인버스 다리 유동성이 약함).
+`surge duel --pair all`이 전 페어 카드를 한 번에 출력·저장. 콜은 `(pair, 날짜)` 키로
 저장·채점. 모든 페어 종목+지수+매크로+아시아 4사의 일봉이 `price_history`에 영구
 아카이브됨(`surge duel-archive`; 아침 잡이 3mo 증분 적재; `--offline` 백테스트 가능).
+
+### 단일종목 예외 — NVDL/NVD (2026-07-03)
+
+사용자 요청으로 SanDisk·Oklo·SK하이닉스 레버리지를 검토하는 과정에서 "단일종목은
+원칙적으로 제외"라는 이 문서의 오래된 원칙 자체를 재검증했다. COIN(CONL/CONI —
+롱숏 유동성 격차 161배)·MSTR(MSTX/SMST — 27배)·PLTR(PLTU/PLTD — 배율 자체가
+2x/1x 비대칭, 매칭 페어 아님)·TSLA(TSLL/TSLQ — **발행사가 다름**, Direxion vs
+Tradr)를 전부 스크리닝했고 전부 탈락. **NVDL/NVD만 전 기준을 통과**:
+
+- 동일 발행사(GraniteShares), 매칭 2x/2x, 양쪽 3년+ 역사
+- **숏 다리(NVD) 거래량이 롱(NVDL)보다 오히려 큼**(~64M주 vs ~14M주/일) — 지금까지
+  검토한 모든 단일종목 후보의 실패 패턴(숏 다리 유동성 붕괴)과 정반대
+- 신호셋 고아 아님: NVDA는 이미 soxl_soxs·tqqq_sqqq·tecl_tecs 3개 페어의
+  AMVF `leader` 종목(`baskets.py`) — asia_lead·리더십 신호가 실제로 연결될
+  개연성이 labu_labd(바이오텍, 신호 전이 실패 기록됨)와 다르다.
+- 이 페어엔 바스켓을 등록하지 않았다 — NVDA 자신이 기초지수이므로 "자기 바스켓
+  대비 리더십"은 순환논리가 된다. `framework_features("nvdl_nvd")`는 안전하게
+  빈 결과를 반환(크래시 없음), 나머지 신호셋(아시아 선행·VIX·모멘텀 등)으로만 경쟁.
+
+**정직한 현재 상태**: 코드·레지스트리·테스트는 완성됐으나, 이 실행 환경은
+yfinance·pykrx 라이브 fetch가 네트워크(TLS) 계층에서 전면 차단돼 있어(이 문서
+작성 시점까지 SOXL조차 조회 실패) `price_history`에 NVDL/NVD/NVDA 실 데이터가
+아직 없다. 따라서 **이 페어의 백테스트·확신 원장 수치는 존재하지 않는다** —
+날조하지 않고 비워둔다. 네트워크가 되는 환경(예: GitHub Actions 러너)에서
+`surge duel-archive` 1회 + `surge adaptive --calibrate --offline --pair nvdl_nvd`
+를 실행하면 채워진다.
 
 ## 5년 교차 매트릭스 (2026-06-11, 슬리피지 2bp, 각 ~775일 베팅)
 

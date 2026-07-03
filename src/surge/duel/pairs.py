@@ -1,13 +1,30 @@
 """Leveraged/inverse pair registry — the duel engine's tradable universe.
 
-Curated to index-underlying pairs only (clean label = the underlying's
-open→close sign; single-stock 2x products are excluded: idiosyncratic news
-dominates and the inverse legs are often illiquid). All legs are ultra-liquid
-Direxion/ProShares 3x products.
+Curated to index-underlying pairs by default (clean label = the underlying's
+open→close sign; single-stock 2x products are USUALLY excluded — idiosyncratic
+news dominates and the inverse legs are often illiquid). All index legs are
+ultra-liquid Direxion/ProShares 3x products.
 
 Note on signals: the Asia semiconductor lead is strongest for SOXX and is a
 general US-tech-beta proxy for the others — per-pair ICs in `duel-backtest`
 show how much it actually carries for each underlying.
+
+## Single-stock exception: NVDL/NVD (2026-07-03)
+
+A researched exception to the single-stock exclusion. Screened against COIN
+(CONL/CONI — 161x long/short liquidity gap), MSTR (MSTX/SMST — 27x gap),
+PLTR (PLTU/PLTD — asymmetric 2x/1x leverage, not a matched pair), and TSLA
+(TSLL/TSLQ — mismatched ISSUERS, Direxion vs Tradr). NVDL/NVD alone cleared
+every bar: same issuer (GraniteShares), matched 2x/2x, ~3+ years of history
+each, and the SHORT leg's volume (~64M sh/day) actually EXCEEDS the long
+leg's (~14M sh/day) — the opposite of every other candidate's failure mode.
+It also is not an orphan signal-wise: NVDA is already the `leader` ticker in
+three existing baskets (soxl_soxs/tqqq_sqqq/tecl_tecs — see baskets.py), so
+the asia_lead/AMVF machinery has a genuine (if unproven) causal story here,
+unlike labu_labd's documented signal-transfer failure. No basket entry is
+registered for this pair — NVDA IS the underlying, so "leadership vs its own
+basket" would be circular; it races on the same signal set as every other
+pair instead.
 """
 
 from __future__ import annotations
@@ -39,6 +56,12 @@ PAIRS: dict[str, dict] = {
     "fas_faz": {
         "id": "fas_faz", "bull": "FAS", "bear": "FAZ",
         "underlying": "XLF", "name": "금융 3x",
+    },
+    # ── single-stock exception (see module docstring for the screening that
+    # justified it): NVDA is both leg AND already the existing baskets' leader ──
+    "nvdl_nvd": {
+        "id": "nvdl_nvd", "bull": "NVDL", "bear": "NVD",
+        "underlying": "NVDA", "name": "엔비디아 2x (단일종목 예외)",
     },
 }
 

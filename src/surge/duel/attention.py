@@ -23,7 +23,8 @@ from ..db import connect, upsert, utc_now
 
 # pair → the value-chain leader whose attention proxies the sector's
 LEADERS = {"soxl_soxs": "NVDA", "tqqq_sqqq": "NVDA",
-           "tecl_tecs": "NVDA", "labu_labd": "VRTX"}
+           "tecl_tecs": "NVDA", "labu_labd": "VRTX",
+           "nvdl_nvd": "NVDA"}   # the pair's own underlying — most direct read
 
 
 def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
