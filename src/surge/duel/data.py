@@ -130,6 +130,16 @@ def prepare(frames: dict[str, pd.DataFrame], pair: dict | None = None,
         # the moment the committed rule enters. Used ONLY by the gap guard —
         # never as a decision feature (the call itself is committed pre-open).
         s["gap_ret"] = gap
+        # technical layer (leak-safe, D−1): Wilder RSI(14) — overbought/oversold
+        # state the linear momentum features can't express — and relative
+        # volume (participation confirms or questions a move).
+        delta = s["close"].diff()
+        gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+        s["f_rsi14"] = (100 - 100 / (1 + gain / loss.mask(loss == 0))).shift(1)
+        if "volume" in s.columns:
+            vol_ma = s["volume"].rolling(20).mean()
+            s["f_rvol20"] = (s["volume"] / vol_ma.mask(vol_ma == 0)).shift(1)
         # relative strength vs the broad-tech proxy (leak-safe, D−1): is the
         # pair's sector out/under-running the market it trades inside of?
         proxy = frames.get(MARKET_PROXY)
@@ -178,7 +188,8 @@ def _base_ctx(pair: dict, date: str) -> dict:
         "date": date, "pair": pair, "underlying": pair["underlying"],
         "und_ret1": None, "und_ret5": None, "und_vol20": None,
         "und_sma50_dist": None, "und_oc_mom5": None, "und_oc1": None,
-        "und_gap1": None, "und_rel20": None, "vix_level": None, "vix_chg": None,
+        "und_gap1": None, "und_rel20": None, "und_rsi": None, "und_rvol": None,
+        "vix_level": None, "vix_chg": None,
         "tnx_chg": None, "credit_chg": None, "dollar_chg": None,
         "bonds_chg": None, "asia": {}, "futures_ret": None, "atr_pct": {},
     }
@@ -201,7 +212,8 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
         und_vol20=float(row["f_vol20"]), und_sma50_dist=float(row["f_sma50_dist"]),
     )
     for key, col in (("und_oc_mom5", "f_oc_mom5"), ("und_oc1", "f_oc1"),
-                     ("und_gap1", "f_gap1"), ("und_rel20", "f_rel20")):
+                     ("und_gap1", "f_gap1"), ("und_rel20", "f_rel20"),
+                     ("und_rsi", "f_rsi14"), ("und_rvol", "f_rvol20")):
         v = row.get(col)
         if v is not None and not pd.isna(v):
             ctx[key] = float(v)
@@ -263,6 +275,16 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
         ctx["und_rel20"] = float(
             (closes.iloc[-1] / closes.iloc[-21] - 1)
             - (proxy["close"].iloc[-1] / proxy["close"].iloc[-21] - 1))
+    delta = closes.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rsi = 100 - 100 / (1 + gain / loss.mask(loss == 0))
+    if not pd.isna(rsi.iloc[-1]):
+        ctx["und_rsi"] = float(rsi.iloc[-1])
+    if "volume" in und.columns and len(und) >= 20:
+        vma = und["volume"].rolling(20).mean().iloc[-1]
+        if vma and not pd.isna(vma):
+            ctx["und_rvol"] = float(und["volume"].iloc[-1] / vma)
     vix = prepared.get("^VIX")
     if vix is not None and len(vix) >= 2:
         ctx["vix_level"] = float(vix["close"].iloc[-1])

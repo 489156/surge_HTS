@@ -137,6 +137,20 @@ def _rel_strength(ctx: dict) -> float | None:
     return _clip(math.tanh(v / (vol * math.sqrt(20)) / 1.5))
 
 
+def _rsi_reversal(ctx: dict) -> float | None:
+    """Classic oscillator hypothesis: an OVERBOUGHT underlying (RSI>70) fades
+    intraday, an OVERSOLD one (RSI<30) bounces. Silent in the neutral zone —
+    the factor race judges it only on the days it actually speaks."""
+    rsi = ctx.get("und_rsi")
+    if rsi is None:
+        return None
+    if rsi >= 70:
+        return _clip(-(rsi - 70) / 20)
+    if rsi <= 30:
+        return _clip((30 - rsi) / 20)
+    return None
+
+
 def _fomc_eve_drift(ctx: dict) -> float | None:
     """The documented pre-FOMC announcement drift: long bias the session
     BEFORE a decision day. Fires only on eve days (None otherwise — the
@@ -164,6 +178,7 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "prev_intraday_follow": _prev_intraday_follow,
     "rel_strength": _rel_strength,
     "fomc_eve_drift": _fomc_eve_drift,
+    "rsi_reversal": _rsi_reversal,
 }
 
 _MIN_CONVICTION = 0.05   # |value| below this = no directional call (not scored)

@@ -32,9 +32,17 @@ COMPONENT_FEATURES = ("asia_lead", "trend", "momentum_5d", "vix_regime",
                       "rates", "mean_reversion")
 INTRADAY_FEATURES = ("oc_mom5", "oc1", "gap1")
 MARKET_FEATURES = ("rel_qqq",)                    # sector vs broad-tech proxy
+TECH_FEATURES = ("rsi", "rvol")                   # oscillator + participation
 CALENDAR_FEATURES = ("dow_mon", "dow_fri", "fomc", "fomc_eve")
+# FEATURES is the full VECTOR (everything computable); BASE_FEATURES is what
+# the production engine actually trains on. New variables enter the vector
+# immediately but must EARN a base slot through the forward config race —
+# the 16-feature replay de-anchored the 55-58% bucket (48.2%), so the tech
+# layer races as `adaptive_tech` instead of silently joining the base.
 FEATURES = (*COMPONENT_FEATURES, *INTRADAY_FEATURES,
-            *MARKET_FEATURES, *CALENDAR_FEATURES)
+            *MARKET_FEATURES, *TECH_FEATURES, *CALENDAR_FEATURES)
+BASE_FEATURES = (*COMPONENT_FEATURES, *INTRADAY_FEATURES,
+                 *MARKET_FEATURES, *CALENDAR_FEATURES)
 
 # ── the learner's OWN hyperparameters as racing hypotheses ───────────────────
 # The recursive step: not only the factor weights but the *estimator itself*
@@ -53,6 +61,7 @@ CONFIGS: dict[str, dict] = {
     "adaptive_votes": {"features": COMPONENT_FEATURES},     # legacy votes only
     "adaptive_nocal": {"features": (*COMPONENT_FEATURES, *INTRADAY_FEATURES,
                                     *MARKET_FEATURES)},     # calendar ablation
+    "adaptive_tech": {"features": FEATURES},     # + RSI/RVOL (candidacy race)
 }
 
 
@@ -68,7 +77,7 @@ def resolve_config(name: str) -> dict:
         "ridge_lambda": cfg.get("ridge_lambda", settings.duel_adaptive_ridge),
         "min_train": cfg.get("min_train", settings.duel_adaptive_min_train),
         "window": cfg.get("window"),
-        "features": tuple(cfg.get("features", FEATURES)),
+        "features": tuple(cfg.get("features", BASE_FEATURES)),
     }
 
 
@@ -97,6 +106,11 @@ def feature_vector(ctx: dict, components) -> list[float]:
     # relative strength: 20d horizon → scale by √20·σ
     rel = ctx.get("und_rel20")
     out.append(_clip(math.tanh((rel or 0.0) / (vol * math.sqrt(20)) / 1.5)))
+    # technicals: RSI centered at 50 → [-1,1]; relative volume centered at 1
+    rsi = ctx.get("und_rsi")
+    out.append(_clip((rsi - 50.0) / 50.0) if rsi is not None else 0.0)
+    rvol = ctx.get("und_rvol")
+    out.append(_clip(math.tanh(((rvol or 1.0) - 1.0) / 1.5)))
     # calendar variables — deterministic functions of the session date; the
     # learner estimates their drift coefficients (e.g. pre-FOMC drift) itself
     out.extend(_calendar_reads(ctx.get("date") or ""))

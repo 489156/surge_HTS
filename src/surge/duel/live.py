@@ -116,7 +116,16 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
         d.shadow_prob = prob        # card cites conviction WITH its evidence
 
     _persist(d)
+    try:                            # leader earnings proximity → live archive
+        ctx["leader_earnings_days"] = _leader_earnings_days(pair_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("earnings proximity skipped for {}: {}", pair_id, exc)
     _persist_ctx(pair, ctx)         # point-in-time archive of live-only reads
+    try:                            # options-flow snapshot (keyless, archive-only)
+        from . import options
+        options.record(pair["underlying"], d.date)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("options snapshot skipped for {}: {}", pair_id, exc)
     variants.capture(pair, d.date, d.components)   # shadow A/B (re-weight existing)
     factors.record(pair, d.date, ctx)              # shadow FACTORS ("what to add?")
     try:                                           # AMVF/ADVCRF/NGRF basket factors
@@ -169,6 +178,27 @@ def _adaptive_shadows(pair: dict, ctx: dict, components) -> float | None:
             adaptive.record_weights(pair, ctx["date"], model)
         variants.capture_external(name, pair, ctx["date"], 2.0 * p - 1.0)
     return base_prob
+
+
+def _leader_earnings_days(pair_id: str) -> float | None:
+    """Sessions until the value-chain leader's next earnings (NVDA nights are
+    regime nights for semis). Keyless via yfinance; None when unknown."""
+    from .attention import LEADERS
+
+    lead = LEADERS.get(pair_id)
+    if not lead:
+        return None
+    import pandas as pd
+    import yfinance as yf
+
+    ed = yf.Ticker(lead).get_earnings_dates(limit=8)
+    if ed is None or ed.empty:
+        return None
+    now = pd.Timestamp.now(tz=ed.index.tz) if ed.index.tz else pd.Timestamp.now()
+    future = [ts for ts in ed.index if ts >= now]
+    if not future:
+        return None
+    return float((min(future) - now).days)
 
 
 def _persist_ctx(pair: dict, ctx: dict) -> None:

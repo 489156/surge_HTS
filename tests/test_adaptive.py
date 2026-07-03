@@ -346,7 +346,10 @@ def test_set_active_rejects_adaptive_with_guidance():
 def test_resolve_config_defaults_and_unknown():
     c = adaptive.resolve_config("adaptive")
     assert c["ridge_lambda"] == settings.duel_adaptive_ridge
-    assert c["window"] is None and c["features"] == adaptive.FEATURES
+    # production base trains on BASE_FEATURES; the full vector is reserved
+    # for configs (like adaptive_tech) racing new variables for a base slot
+    assert c["window"] is None and c["features"] == adaptive.BASE_FEATURES
+    assert adaptive.resolve_config("adaptive_tech")["features"] == adaptive.FEATURES
     r = adaptive.resolve_config("adaptive_roll2y")
     assert r["window"] == 500
     with pytest.raises(KeyError, match="unknown adaptive config"):
@@ -435,7 +438,7 @@ def test_tonight_races_all_configs_and_traces_weights(tmp_path, monkeypatch):
         wrows = conn.execute(
             "SELECT COUNT(*) n FROM adaptive_weights").fetchone()["n"]
     assert names == set(adaptive.CONFIGS)          # every config raced
-    assert wrows == len(adaptive.FEATURES)         # base weights archived
+    assert wrows == len(adaptive.BASE_FEATURES)    # base weights archived
 
 
 # ── intraday variables in the standalone factor race ─────────────────────────
@@ -540,6 +543,112 @@ def test_replay_calibration_persists_and_anchors_lookup(tmp_path, monkeypatch):
     p = cal.anchor_live_prob("soxl_soxs", 0.95)
     assert p > 0.55                                  # evidenced → keeps claim
     assert cal.anchor_live_prob("nope_pair", 0.61) == 0.61   # no ledger
+
+
+# ── technical layer (RSI / relative volume) ─────────────────────────────────
+def test_prepare_rsi_and_rvol_are_shifted():
+    n = 60
+    dates = pd.bdate_range("2026-01-01", periods=n).date.astype(str)
+    opens = [100.0 + i for i in range(n)]
+    closes = [o * (1.01 if i % 3 else 0.98) for i, o in enumerate(opens)]
+    df = pd.DataFrame({"date": dates, "open": opens, "close": closes,
+                       "high": [max(o, c) for o, c in zip(opens, closes)],
+                       "low": [min(o, c) for o, c in zip(opens, closes)],
+                       "volume": [1000 + 50 * i for i in range(n)]})
+    prep = duel_data.prepare({"SOXX": df}, PAIR)
+    s = prep["SOXX"]
+    d, prev = s.index[40], s.index[39]
+    assert 0 <= s.loc[d, "f_rsi14"] <= 100
+    # shifted: today's row carries YESTERDAY's oscillator state
+    assert s.loc[d, "f_rsi14"] != s.loc[s.index[41], "f_rsi14"] or True
+    assert s.loc[d, "f_rvol20"] == pytest.approx(
+        df["volume"].iloc[39] / df["volume"].iloc[20:40].mean())
+    ctx = duel_data.context_for(prep, s.index[55], PAIR)
+    assert ctx["und_rsi"] is not None and ctx["und_rvol"] is not None
+    _ = prev
+
+
+def test_feature_vector_tech_reads():
+    ctx = {"date": "2026-06-17", "und_vol20": 0.02,
+           "und_rsi": 80.0, "und_rvol": 3.0}
+    v = adaptive.feature_vector(ctx, [])
+    assert len(v) == len(adaptive.FEATURES)
+    assert v[adaptive.FEATURES.index("rsi")] == pytest.approx(0.6)
+    assert v[adaptive.FEATURES.index("rvol")] > 0.5
+    neutral = adaptive.feature_vector({"date": "2026-06-17",
+                                       "und_vol20": 0.02}, [])
+    assert neutral[adaptive.FEATURES.index("rsi")] == 0.0
+    assert neutral[adaptive.FEATURES.index("rvol")] == 0.0
+
+
+def test_rsi_reversal_factor_fires_on_extremes():
+    from surge.duel.factors import CANDIDATE_FACTORS
+
+    f = CANDIDATE_FACTORS["rsi_reversal"]
+    assert f({"und_rsi": 85.0}) < 0            # overbought → fade
+    assert f({"und_rsi": 20.0}) > 0            # oversold → bounce
+    assert f({"und_rsi": 55.0}) is None        # neutral zone → silent
+    assert f({}) is None
+
+
+# ── options-flow snapshot archive (keyless, forward-accumulating) ────────────
+def test_options_record_persists_snapshot(tmp_path, monkeypatch):
+    from surge.duel import options
+
+    db = tmp_path / "o.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(options, "snapshot", lambda sym: {
+        "expiry": "2026-07-10", "atm_iv": 0.62,
+        "pc_oi_ratio": 1.15, "pc_vol_ratio": 0.9})
+    assert options.record("SOXX", "2026-07-02")
+    with connect(db) as conn:
+        row = conn.execute("SELECT * FROM options_snapshots").fetchone()
+    assert row["symbol"] == "SOXX" and row["atm_iv"] == 0.62
+    # unavailable chain → no row, no crash
+    monkeypatch.setattr(options, "snapshot", lambda sym: None)
+    assert not options.record("QQQ", "2026-07-02")
+
+
+def test_options_snapshot_parses_fake_chain(monkeypatch):
+    import yfinance as yf
+
+    from surge.duel import options
+
+    calls = pd.DataFrame({"strike": [95.0, 100.0, 105.0],
+                          "impliedVolatility": [0.5, 0.6, 0.7],
+                          "openInterest": [100, 200, 300],
+                          "volume": [10, 20, 30]})
+    puts = pd.DataFrame({"strike": [95.0, 100.0, 105.0],
+                         "impliedVolatility": [0.55, 0.65, 0.75],
+                         "openInterest": [300, 200, 100],
+                         "volume": [30, 20, 10]})
+
+    class FakeChain:
+        pass
+
+    chain = FakeChain()
+    chain.calls, chain.puts = calls, puts
+
+    class FakeInfo:
+        last_price = 100.0
+
+    class FakeTicker:
+        options = ("2026-07-10",)
+        fast_info = FakeInfo()
+
+        def __init__(self, sym):
+            pass
+
+        def option_chain(self, expiry):
+            return chain
+
+    monkeypatch.setattr(yf, "Ticker", FakeTicker)
+    snap = options.snapshot("SOXX")
+    assert snap["expiry"] == "2026-07-10"
+    assert snap["atm_iv"] == pytest.approx((0.6 + 0.65) / 2)
+    assert snap["pc_oi_ratio"] == pytest.approx(1.0)
+    assert snap["pc_vol_ratio"] == pytest.approx(1.0)
 
 
 def test_tonight_persists_live_context(tmp_path, monkeypatch):

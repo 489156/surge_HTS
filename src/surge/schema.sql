@@ -356,6 +356,18 @@ CREATE TABLE IF NOT EXISTS duel_live_context (
     PRIMARY KEY (pair, decision_date)
 );
 
+-- ── Options-flow snapshots (무키·전방 축적; 몇 달 뒤 학습 가능 변인) ──────────
+CREATE TABLE IF NOT EXISTS options_snapshots (
+    symbol       TEXT NOT NULL,
+    date         TEXT NOT NULL,            -- session the snapshot informs
+    expiry       TEXT,                     -- nearest chain expiry sampled
+    atm_iv       REAL,                     -- ATM implied vol (call/put mean)
+    pc_oi_ratio  REAL,                     -- put/call open-interest ratio
+    pc_vol_ratio REAL,                     -- put/call volume ratio
+    captured_at  TEXT NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
+
 -- ── Secured price history — the duel research archive ───────────────────────
 -- Daily bars for every pair leg/underlying + macro/Asia series, persisted so
 -- backtests and research never depend on a live vendor being up.
