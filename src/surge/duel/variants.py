@@ -95,9 +95,30 @@ def active_variant_name() -> str:
     return row["value"] if row and row["value"] else "champion"
 
 
+def capture_external(name: str, pair: dict, date: str, score: float) -> None:
+    """Shadow-record a call from an engine OUTSIDE the multiplier-map family
+    (e.g. the walk-forward adaptive model) so the same forward A/B scores it.
+    Always commits a direction — sample efficiency, like the other variants."""
+    from ..db import upsert
+
+    with connect() as conn:
+        upsert(conn, "duel_variants", [{
+            "variant": name, "pair": pair["id"], "decision_date": date,
+            "side": side_for(score, pair["bull"], pair["bear"]),
+            "score": round(score, 4), "conviction": round(abs(score), 4),
+            "captured_at": utc_now(),
+        }], immutable=("captured_at",))
+
+
 def set_active(name: str) -> None:
     import json
 
+    if name.startswith("adaptive"):
+        raise KeyError(
+            f"'{name}' is not a multiplier variant — the adaptive engine is "
+            "promoted by setting SURGE_DUEL_USE_ADAPTIVE=1 (human gate; a "
+            "non-base config wins by editing CONFIGS['adaptive']; see "
+            "duel/adaptive.py)")
     if name not in VARIANTS:
         raise KeyError(f"unknown variant '{name}' (choices: {list(VARIANTS)})")
     now = utc_now()

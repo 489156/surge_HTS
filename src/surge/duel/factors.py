@@ -100,6 +100,69 @@ def _bond_bid(ctx: dict) -> float | None:
     return None if b is None else _clip(math.tanh(b / 0.006))
 
 
+def _intraday_mom(ctx: dict) -> float | None:
+    """Intraday-only momentum CONTINUATION: the label is open→close, so the
+    hypothesis is that recent intraday behavior (gap excluded) persists —
+    distinct from momentum_5d, which mixes overnight gaps into the read."""
+    v, vol = ctx.get("und_oc_mom5"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / (vol / math.sqrt(5)) / 1.5))
+
+
+def _prev_gap_follow(ctx: dict) -> float | None:
+    """Prior session's open gap FOLLOWED the next day (information arrival
+    persists) — the standalone forward test of the gap-continuation read that
+    the gap-guard replay surfaced."""
+    v, vol = ctx.get("und_gap1"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / vol / 1.5))
+
+
+def _prev_intraday_follow(ctx: dict) -> float | None:
+    """Prior session's intraday (open→close) leg continues the next session."""
+    v, vol = ctx.get("und_oc1"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / vol / 1.5))
+
+
+def _rel_strength(ctx: dict) -> float | None:
+    """Sector vs broad-tech (QQQ) 20d relative strength CONTINUES — leaders
+    keep leading intraday. Silent for the QQQ-underlying pair."""
+    v, vol = ctx.get("und_rel20"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / (vol * math.sqrt(20)) / 1.5))
+
+
+def _rsi_reversal(ctx: dict) -> float | None:
+    """Classic oscillator hypothesis: an OVERBOUGHT underlying (RSI>70) fades
+    intraday, an OVERSOLD one (RSI<30) bounces. Silent in the neutral zone —
+    the factor race judges it only on the days it actually speaks."""
+    rsi = ctx.get("und_rsi")
+    if rsi is None:
+        return None
+    if rsi >= 70:
+        return _clip(-(rsi - 70) / 20)
+    if rsi <= 30:
+        return _clip((30 - rsi) / 20)
+    return None
+
+
+def _fomc_eve_drift(ctx: dict) -> float | None:
+    """The documented pre-FOMC announcement drift: long bias the session
+    BEFORE a decision day. Fires only on eve days (None otherwise — the
+    factor race scores it exclusively on its own event days)."""
+    from .calendar import fomc_eve
+
+    e = fomc_eve(ctx.get("date") or "")
+    if not e:
+        return None
+    return 0.6
+
+
 CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "asia_breadth": _asia_breadth,
     "und_accel": _und_accel,
@@ -108,6 +171,14 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "credit_risk": _credit_risk,
     "dollar_drag": _dollar_drag,
     "bond_bid": _bond_bid,
+    # intraday decomposition variables (feed the adaptive learner too) — their
+    # STANDALONE forward records accumulate here (변인 추정의 독립 심판)
+    "intraday_mom": _intraday_mom,
+    "prev_gap_follow": _prev_gap_follow,
+    "prev_intraday_follow": _prev_intraday_follow,
+    "rel_strength": _rel_strength,
+    "fomc_eve_drift": _fomc_eve_drift,
+    "rsi_reversal": _rsi_reversal,
 }
 
 _MIN_CONVICTION = 0.05   # |value| below this = no directional call (not scored)

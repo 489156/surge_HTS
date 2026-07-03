@@ -19,7 +19,7 @@ from ..db import connect, utc_now
 from ..db import upsert as db_upsert
 from . import data as ddata
 from .backtest import simulate_bracket
-from .decide import DuelDecision, decide
+from .decide import DuelDecision, decide, decide_adaptive, guard_triggered
 
 ET = ZoneInfo("America/New_York")
 
@@ -99,7 +99,33 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     from . import factors, variants
 
     d = decide(ctx, entry_ref=refs, mult=variants.active_multipliers())
+
+    # Walk-forward adaptive engine: every CONFIG races as a SHADOW row (the
+    # estimator itself is a hypothesis); the base config's fitted weights are
+    # archived nightly (변인 추정 박제). Production flips only behind the human
+    # gate (duel_use_adaptive).
+    try:
+        prob = _adaptive_shadows(pair, ctx, d.components)
+    except Exception as exc:  # noqa: BLE001 — the learner must never break the call
+        logger.debug("adaptive shadow skipped for {}: {}", pair_id, exc)
+        prob = None
+    if prob is not None:
+        if settings.duel_use_adaptive:
+            d = decide_adaptive(ctx, prob, entry_ref=refs,
+                                components=d.components)
+        d.shadow_prob = prob        # card cites conviction WITH its evidence
+
     _persist(d)
+    try:                            # leader earnings proximity → live archive
+        ctx["leader_earnings_days"] = _leader_earnings_days(pair_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("earnings proximity skipped for {}: {}", pair_id, exc)
+    _persist_ctx(pair, ctx)         # point-in-time archive of live-only reads
+    try:                            # options-flow snapshot (keyless, archive-only)
+        from . import options
+        options.record(pair["underlying"], d.date)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("options snapshot skipped for {}: {}", pair_id, exc)
     variants.capture(pair, d.date, d.components)   # shadow A/B (re-weight existing)
     factors.record(pair, d.date, ctx)              # shadow FACTORS ("what to add?")
     try:                                           # AMVF/ADVCRF/NGRF basket factors
@@ -117,6 +143,79 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     return d
 
 
+def _adaptive_shadows(pair: dict, ctx: dict, components) -> float | None:
+    """Race EVERY adaptive config on tonight's context: one training-set build
+    from the price_history archive (kept current by the daily duel-archive
+    job), one shadow variant row per config, plus the base config's weight
+    trace. Returns the base config's calibrated P(up) — None when the archive
+    has fewer labeled sessions than min_train."""
+    from . import adaptive, variants
+
+    frames = ddata.frames_from_archive(pair)
+    if not frames:
+        return None
+    prep = ddata.prepare(frames, pair)
+    _dates, X, y = adaptive.training_set(prep, pair)
+    feats = adaptive.feature_vector(ctx, components)
+
+    base_prob: float | None = None
+    for name in adaptive.CONFIGS:
+        try:
+            model = adaptive.fit_config(X, y, name)
+        except Exception as exc:  # noqa: BLE001 — one config must not kill the race
+            logger.debug("adaptive config {} skipped: {}", name, exc)
+            continue
+        if model is None:
+            continue
+        p = model.prob_up(feats)
+        if name == "adaptive":
+            # anchor claimed conviction to the observed OOS hit rate of its
+            # bucket (ledger refreshed nightly by `surge adaptive --calibrate`)
+            from .calibration import anchor_live_prob
+
+            p = anchor_live_prob(pair["id"], p)
+            base_prob = p
+            adaptive.record_weights(pair, ctx["date"], model)
+        variants.capture_external(name, pair, ctx["date"], 2.0 * p - 1.0)
+    return base_prob
+
+
+def _leader_earnings_days(pair_id: str) -> float | None:
+    """Sessions until the value-chain leader's next earnings (NVDA nights are
+    regime nights for semis). Keyless via yfinance; None when unknown."""
+    from .attention import LEADERS
+
+    lead = LEADERS.get(pair_id)
+    if not lead:
+        return None
+    import pandas as pd
+    import yfinance as yf
+
+    ed = yf.Ticker(lead).get_earnings_dates(limit=8)
+    if ed is None or ed.empty:
+        return None
+    now = pd.Timestamp.now(tz=ed.index.tz) if ed.index.tz else pd.Timestamp.now()
+    future = [ts for ts in ed.index if ts >= now]
+    if not future:
+        return None
+    return float((min(future) - now).days)
+
+
+def _persist_ctx(pair: dict, ctx: dict) -> None:
+    """Freeze the numeric context the call saw (futures and any other
+    live-only read included) — the raw material future learners train on."""
+    numeric = {k: v for k, v in ctx.items()
+               if isinstance(v, int | float) or v is None}
+    numeric["asia"] = {k: dict(v) for k, v in (ctx.get("asia") or {}).items()}
+    numeric["atr_pct"] = dict(ctx.get("atr_pct") or {})
+    with connect() as conn:
+        db_upsert(conn, "duel_live_context", [{
+            "pair": pair["id"], "decision_date": ctx["date"],
+            "ctx": json.dumps(numeric, ensure_ascii=False),
+            "captured_at": utc_now(),
+        }], immutable=("captured_at",))
+
+
 def _persist(d: DuelDecision) -> None:
     row = {
         "pair": d.pair_id,
@@ -128,6 +227,8 @@ def _persist(d: DuelDecision) -> None:
         "entry_ref": d.entry_ref,
         "stop_price": d.stop_price,
         "target_price": d.target_price,
+        "gap_guard": d.gap_guard,
+        "model": d.model,
         "reasons": json.dumps(d.reasons, ensure_ascii=False),
         "components": json.dumps(
             [{"name": c.name, "value": c.value, "weight": c.weight}
@@ -154,8 +255,9 @@ def eval_outcomes(frames: dict | None = None) -> dict:
     ).isoformat()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT pair, decision_date, side, stop_price, target_price "
-            "FROM duel_decisions WHERE evaluated_at IS NULL AND decision_date <= ?",
+            "SELECT pair, decision_date, side, stop_price, target_price, "
+            "gap_guard FROM duel_decisions "
+            "WHERE evaluated_at IS NULL AND decision_date <= ?",
             (scorable_through,),
         ).fetchall()
     pending = [dict(r) for r in rows]
@@ -200,6 +302,21 @@ def eval_outcomes(frames: dict | None = None) -> dict:
             updates: dict = {"evaluated_at": utc_now(), "soxx_oc_ret": label}
 
             if side in (pair["bull"], pair["bear"]) and label is not None:
+                # committed gap-guard condition, executed mechanically at the
+                # open: pre-priced signal → the rule did NOT enter.
+                gap = None
+                if "gap_ret" in und.columns and dte in und.index:
+                    g = und.loc[dte, "gap_ret"]
+                    gap = None if g != g else float(g)   # NaN-safe
+                if guard_triggered(side, pair, r["gap_guard"], gap):
+                    updates.update(exit_reason="gap_guard")
+                    with connect() as conn:
+                        sets = ", ".join(f"{k}=?" for k in updates)
+                        conn.execute(
+                            f"UPDATE duel_decisions SET {sets} "
+                            "WHERE pair=? AND decision_date=?",
+                            (*updates.values(), pid, dte))
+                    continue
                 f = prep.get(side)
                 if f is not None and dte in f.index:
                     bar = f.loc[dte]

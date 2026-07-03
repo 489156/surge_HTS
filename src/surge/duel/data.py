@@ -24,6 +24,7 @@ from ..sources import market
 from .pairs import DEFAULT_PAIR, get_pair
 
 MACRO_SYMBOLS = ["^VIX", "^TNX"]
+MARKET_PROXY = "QQQ"          # relative-strength benchmark (semis vs broad tech)
 ASIA = {  # name -> (ticker, weight within the Asia composite)
     "TSMC": ("2330.TW", 0.40),
     "Samsung": ("005930.KS", 0.30),
@@ -62,6 +63,9 @@ def fetch_shared(period: str = "2y") -> dict[str, pd.DataFrame]:
         df = market.download_ohlcv([ticker], period=period)
         if not df.empty:                              # absent ⇒ those factors stay silent
             frames[name] = _tidy(df)
+    df = market.download_ohlcv([MARKET_PROXY], period=period)
+    if not df.empty:                                  # relative-strength benchmark
+        frames[MARKET_PROXY] = _tidy(df)
     return frames
 
 
@@ -113,7 +117,37 @@ def prepare(frames: dict[str, pd.DataFrame], pair: dict | None = None,
         s["f_ret5"] = s["close"].pct_change(5).shift(1)
         s["f_vol20"] = ret.rolling(20).std().shift(1)
         s["f_sma50_dist"] = (s["close"] / s["close"].rolling(50).mean() - 1).shift(1)
-        s["oc_ret"] = s["close"] / s["open"] - 1  # LABEL ONLY (same-day)
+        # Intraday-aware features: the LABEL is open→close, but close→close
+        # features mix in the overnight gap. Decompose so the learner can see
+        # the intraday-only history separately (all shifted → D−1 knowledge).
+        oc = s["close"] / s["open"] - 1
+        gap = s["open"] / s["close"].shift(1) - 1
+        s["f_oc_mom5"] = oc.rolling(5).mean().shift(1)   # intraday-only momentum
+        s["f_oc1"] = oc.shift(1)                          # prior session intraday
+        s["f_gap1"] = gap.shift(1)                        # prior session's open gap
+        s["oc_ret"] = oc          # LABEL ONLY (same-day)
+        # gap_ret is same-day EXECUTION-time info: the open gap is realized at
+        # the moment the committed rule enters. Used ONLY by the gap guard —
+        # never as a decision feature (the call itself is committed pre-open).
+        s["gap_ret"] = gap
+        # technical layer (leak-safe, D−1): Wilder RSI(14) — overbought/oversold
+        # state the linear momentum features can't express — and relative
+        # volume (participation confirms or questions a move).
+        delta = s["close"].diff()
+        gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+        s["f_rsi14"] = (100 - 100 / (1 + gain / loss.mask(loss == 0))).shift(1)
+        if "volume" in s.columns:
+            vol_ma = s["volume"].rolling(20).mean()
+            s["f_rvol20"] = (s["volume"] / vol_ma.mask(vol_ma == 0)).shift(1)
+        # relative strength vs the broad-tech proxy (leak-safe, D−1): is the
+        # pair's sector out/under-running the market it trades inside of?
+        proxy = frames.get(MARKET_PROXY)
+        if proxy is not None and und != MARKET_PROXY:
+            q = _tidy(proxy) if "date" in proxy.columns else proxy
+            rel = (s["close"].pct_change(20)
+                   - q["close"].pct_change(20).reindex(s.index))
+            s["f_rel20"] = rel.shift(1)
         out[und] = s
 
     if "^VIX" in frames:
@@ -153,7 +187,9 @@ def _base_ctx(pair: dict, date: str) -> dict:
     return {
         "date": date, "pair": pair, "underlying": pair["underlying"],
         "und_ret1": None, "und_ret5": None, "und_vol20": None,
-        "und_sma50_dist": None, "vix_level": None, "vix_chg": None,
+        "und_sma50_dist": None, "und_oc_mom5": None, "und_oc1": None,
+        "und_gap1": None, "und_rel20": None, "und_rsi": None, "und_rvol": None,
+        "vix_level": None, "vix_chg": None,
         "tnx_chg": None, "credit_chg": None, "dollar_chg": None,
         "bonds_chg": None, "asia": {}, "futures_ret": None, "atr_pct": {},
     }
@@ -175,6 +211,12 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
         und_ret1=float(row["f_ret1"]), und_ret5=float(row["f_ret5"]),
         und_vol20=float(row["f_vol20"]), und_sma50_dist=float(row["f_sma50_dist"]),
     )
+    for key, col in (("und_oc_mom5", "f_oc_mom5"), ("und_oc1", "f_oc1"),
+                     ("und_gap1", "f_gap1"), ("und_rel20", "f_rel20"),
+                     ("und_rsi", "f_rsi14"), ("und_rvol", "f_rvol20")):
+        v = row.get(col)
+        if v is not None and not pd.isna(v):
+            ctx[key] = float(v)
     vix = prepared.get("^VIX")
     if vix is not None and date in vix.index and not pd.isna(vix.loc[date, "f_level"]):
         ctx["vix_level"] = float(vix.loc[date, "f_level"])
@@ -219,6 +261,30 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
         und_vol20=float(rets.rolling(20).std().iloc[-1]),
         und_sma50_dist=float(closes.iloc[-1] / closes.rolling(50).mean().iloc[-1] - 1),
     )
+    oc = und["close"] / und["open"] - 1              # completed bars only
+    gap = und["open"] / und["close"].shift(1) - 1
+    if len(oc) >= 5 and not pd.isna(oc.iloc[-5:].mean()):
+        ctx["und_oc_mom5"] = float(oc.iloc[-5:].mean())
+    if not pd.isna(oc.iloc[-1]):
+        ctx["und_oc1"] = float(oc.iloc[-1])
+    if not pd.isna(gap.iloc[-1]):
+        ctx["und_gap1"] = float(gap.iloc[-1])
+    proxy = prepared.get(MARKET_PROXY)
+    if (proxy is not None and pair["underlying"] != MARKET_PROXY
+            and len(proxy) >= 21 and len(closes) >= 21):
+        ctx["und_rel20"] = float(
+            (closes.iloc[-1] / closes.iloc[-21] - 1)
+            - (proxy["close"].iloc[-1] / proxy["close"].iloc[-21] - 1))
+    delta = closes.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rsi = 100 - 100 / (1 + gain / loss.mask(loss == 0))
+    if not pd.isna(rsi.iloc[-1]):
+        ctx["und_rsi"] = float(rsi.iloc[-1])
+    if "volume" in und.columns and len(und) >= 20:
+        vma = und["volume"].rolling(20).mean().iloc[-1]
+        if vma and not pd.isna(vma):
+            ctx["und_rvol"] = float(und["volume"].iloc[-1] / vma)
     vix = prepared.get("^VIX")
     if vix is not None and len(vix) >= 2:
         ctx["vix_level"] = float(vix["close"].iloc[-1])
@@ -287,7 +353,7 @@ def frames_from_archive(pair: dict | None = None) -> dict[str, pd.DataFrame]:
     pair = pair or get_pair(DEFAULT_PAIR)
     name_by_ticker = {t: n for n, (t, _w) in ASIA.items()}
     wanted = [pair["bull"], pair["bear"], pair["underlying"], *MACRO_SYMBOLS,
-              *name_by_ticker]
+              MARKET_PROXY, *name_by_ticker]
     frames: dict[str, pd.DataFrame] = {}
     with connect() as conn:
         for sym in wanted:

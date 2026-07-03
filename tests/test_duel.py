@@ -189,12 +189,27 @@ def test_pairs_registry():
 
     assert {"soxl_soxs", "tqqq_sqqq", "tecl_tecs", "labu_labd"} <= set(PAIRS)
     assert {"tna_tza", "fas_faz"} <= set(PAIRS)        # diversifying rate-lift legs
+    assert "nvdl_nvd" in set(PAIRS)                    # screened single-stock exception
     p = get_pair("tqqq_sqqq")
     assert p["bull"] == "TQQQ" and p["bear"] == "SQQQ" and p["underlying"] == "QQQ"
+    nvda = get_pair("nvdl_nvd")
+    assert nvda["bull"] == "NVDL" and nvda["bear"] == "NVD" and nvda["underlying"] == "NVDA"
     syms = all_symbols()
     assert "SOXL" in syms and "QQQ" in syms and len(syms) == len(set(syms))
     with pytest.raises(KeyError):
         get_pair("nope")
+
+
+def test_nvdl_nvd_has_no_basket_but_has_attention_leader():
+    """NVDA is the underlying itself — a basket entry would be circular
+    (leadership vs its own basket), so this pair intentionally has none, but
+    it DOES get the direct-leader attention read (see pairs.py docstring)."""
+    from surge.duel.attention import LEADERS
+    from surge.duel.baskets import BASKETS, framework_features
+
+    assert "nvdl_nvd" not in BASKETS
+    assert framework_features("nvdl_nvd").empty     # graceful, not a crash
+    assert LEADERS["nvdl_nvd"] == "NVDA"
 
 
 def test_decide_routes_to_pair_legs():
@@ -205,6 +220,70 @@ def test_decide_routes_to_pair_legs():
     assert d.side == "TQQQ"            # strong asia-up → bull leg of THIS pair
     assert d.pair_id == "tqqq_sqqq"
     assert d.stop_price < 60.0 < d.target_price
+
+
+def _nvda_frames(n=200, lead=+1):
+    """Same synthetic-lead construction as `_frames`, but keyed for the
+    nvdl_nvd registry entry (NVDA/NVDL/NVD, 2x legs — NOT 3x like the index
+    pairs) to verify the pipeline is genuinely registry-driven rather than
+    hardcoded to the original 4-6 pairs."""
+    dates = pd.bdate_range("2026-01-01", periods=n).date.astype(str)
+
+    def frame(opens, closes, amp=0.001):
+        return pd.DataFrame({
+            "date": dates, "open": opens, "close": closes,
+            "high": [max(o, c) * (1 + amp) for o, c in zip(opens, closes,
+                                                           strict=False)],
+            "low": [min(o, c) * (1 - amp) for o, c in zip(opens, closes,
+                                                          strict=False)],
+            "volume": [1_000_000] * n,
+        })
+
+    asia_c, nv_o, nv_c, nl_o, nl_c, nd_o, nd_c = [], [], [], [], [], [], []
+    a, nv, nl, nd = 100.0, 100.0, 30.0, 30.0
+    for i in range(n):
+        wig = 0.005 if i % 2 == 0 else -0.005
+        a *= 1 + (0.02 + wig) * lead
+        asia_c.append(a)
+        us = (0.015 + wig) * lead
+        nv_o.append(nv)
+        nv *= 1 + us
+        nv_c.append(nv)
+        nl_o.append(nl)
+        nl *= 1 + 2 * us          # NVDL: 2x, not 3x
+        nl_c.append(nl)
+        nd_o.append(nd)
+        nd *= 1 - 2 * us          # NVD: -2x
+        nd_c.append(nd)
+
+    flat = [15.0] * n
+    return {
+        "NVDA": frame(nv_o, nv_c),
+        "NVDL": frame(nl_o, nl_c, amp=0.08),
+        "NVD": frame(nd_o, nd_c, amp=0.08),
+        "^VIX": frame(flat, flat),
+        "^TNX": frame([42.0] * n, [42.0] * n),
+        "TSMC": frame(asia_c, asia_c),
+    }
+
+
+def test_nvdl_nvd_backtest_and_live_call_flow(tmp_path, monkeypatch):
+    """End-to-end proof the pipeline is registry-driven, not hardcoded to the
+    original pairs: 2x (not 3x) legs, no basket, single-stock underlying."""
+    db = tmp_path / "nvdl.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+
+    res = dbt.run(frames=_nvda_frames(), pair_id="nvdl_nvd", gap_guard_z=0)
+    assert res["bull"] == "NVDL" and res["bear"] == "NVD"
+    assert res["n_traded"] > 10
+    assert res["accuracy"] >= 0.9
+
+    frames = _nvda_frames(n=120)
+    last = frames["NVDA"]["date"].iloc[-1]
+    d = dlive.tonight(frames=frames, with_futures=False, session_date=last,
+                      pair_id="nvdl_nvd")
+    assert d.pair_id == "nvdl_nvd" and d.side == "NVDL"
 
 
 def test_migration_adds_pair_column(tmp_path):

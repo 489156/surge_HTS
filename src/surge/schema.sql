@@ -300,6 +300,8 @@ CREATE TABLE IF NOT EXISTS duel_decisions (
     target_price  REAL,
     reasons       TEXT,                  -- human-readable component lines (JSON)
     components    TEXT,                  -- structured [{name,value,weight}] JSON
+    gap_guard     REAL,                  -- cancel-entry gap threshold (return units)
+    model         TEXT DEFAULT 'champion', -- engine that produced the call
     -- realized outcome (filled by duel-eval after the session)
     entry_fill    REAL,
     exit_fill     REAL,
@@ -310,6 +312,60 @@ CREATE TABLE IF NOT EXISTS duel_decisions (
     captured_at   TEXT NOT NULL,
     evaluated_at  TEXT,
     PRIMARY KEY (pair, decision_date)
+);
+
+-- ── Adaptive engine — nightly estimated variable weights (변인 추정 박제) ────
+-- One row per (pair, session, feature): the walk-forward learner's fitted
+-- weight the evening the call was committed. Point-in-time, never overwritten
+-- in spirit (captured_at is write-once) — the archaeological record of WHICH
+-- variables the data said mattered, and how that estimate drifted.
+CREATE TABLE IF NOT EXISTS adaptive_weights (
+    pair          TEXT NOT NULL,
+    decision_date TEXT NOT NULL,
+    feature       TEXT NOT NULL,
+    weight        REAL,
+    n_train       INTEGER,
+    captured_at   TEXT NOT NULL,
+    PRIMARY KEY (pair, decision_date, feature)
+);
+CREATE INDEX IF NOT EXISTS idx_aw_pair_date ON adaptive_weights(pair, decision_date);
+
+-- ── Conviction calibration ledger (확신 구간별 적중률 원장) ──────────────────
+-- Per (pair, probability-bucket, source): how often calls in that conviction
+-- bucket actually hit. source='replay' is refreshed from the walk-forward
+-- archive replay; the forward side is computed live from duel_variants.
+CREATE TABLE IF NOT EXISTS adaptive_calibration (
+    pair        TEXT NOT NULL,
+    bucket      TEXT NOT NULL,
+    source      TEXT NOT NULL,            -- 'replay' (forward is computed live)
+    n           INTEGER NOT NULL DEFAULT 0,
+    wins        INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (pair, bucket, source)
+);
+
+-- ── Live decision context, point-in-time (선물 등 라이브 전용 변인의 박제) ────
+-- Everything the evening call SAW, frozen at commit time. Live-only reads
+-- (NQ futures, later options/IV) become learnable variables once enough
+-- nights accumulate here — without this table they evaporate every morning.
+CREATE TABLE IF NOT EXISTS duel_live_context (
+    pair          TEXT NOT NULL,
+    decision_date TEXT NOT NULL,
+    ctx           TEXT NOT NULL,          -- JSON snapshot (numeric reads only)
+    captured_at   TEXT NOT NULL,
+    PRIMARY KEY (pair, decision_date)
+);
+
+-- ── Options-flow snapshots (무키·전방 축적; 몇 달 뒤 학습 가능 변인) ──────────
+CREATE TABLE IF NOT EXISTS options_snapshots (
+    symbol       TEXT NOT NULL,
+    date         TEXT NOT NULL,            -- session the snapshot informs
+    expiry       TEXT,                     -- nearest chain expiry sampled
+    atm_iv       REAL,                     -- ATM implied vol (call/put mean)
+    pc_oi_ratio  REAL,                     -- put/call open-interest ratio
+    pc_vol_ratio REAL,                     -- put/call volume ratio
+    captured_at  TEXT NOT NULL,
+    PRIMARY KEY (symbol, date)
 );
 
 -- ── Secured price history — the duel research archive ───────────────────────

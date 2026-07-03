@@ -53,7 +53,10 @@ jobs:
           surge init
           surge snapshot
           surge backfill-outcomes
+          surge duel-archive       # keep price_history current — the adaptive
+                                   # engine trains on it before every shadow call
           surge duel --pair all
+          surge adaptive --calibrate --offline --pair all   # 확신 구간 원장 갱신
           surge rotation
           surge rotation-eval
           surge daily            # score → evolve → judge → record (learning_log)
