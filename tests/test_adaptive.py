@@ -117,14 +117,14 @@ def _ctx(**kw):
 
 def test_decide_adaptive_bands():
     refs = {"SOXL": 30.0, "SOXS": 5.0}
-    flat = decide_adaptive(_ctx(), 0.51, entry_ref=refs)
+    flat = decide_adaptive(_ctx(), 0.51, entry_ref=refs)   # |2p−1|=0.02 < 0.05
     assert flat.side == "STAND_ASIDE" and flat.model == "adaptive"
-    half = decide_adaptive(_ctx(), 0.56, entry_ref=refs)
+    half = decide_adaptive(_ctx(), 0.53, entry_ref=refs)   # 0.06 → half
     assert half.side == "SOXL" and half.size_factor == 0.5
-    full = decide_adaptive(_ctx(), 0.70, entry_ref=refs)
+    full = decide_adaptive(_ctx(), 0.56, entry_ref=refs)   # 0.12 ≥ 0.10 → full
     assert full.side == "SOXL" and full.size_factor == 1.0
     assert full.stop_price < 30.0 < full.target_price
-    bear = decide_adaptive(_ctx(), 0.30, entry_ref=refs)
+    bear = decide_adaptive(_ctx(), 0.44, entry_ref=refs)
     assert bear.side == "SOXS"
 
 
@@ -458,3 +458,102 @@ def test_daily_report_includes_variables(tmp_path, monkeypatch):
 
     report = run_daily(write=False)
     assert "variables" in report               # 변인 추정 trace in learning_log
+
+
+# ── FOMC calendar features (keyless, known-in-advance) ──────────────────────
+def test_calendar_fomc_reads():
+    from surge.duel.calendar import fomc_day, fomc_eve
+
+    assert fomc_day("2026-06-17") == 1.0       # decision day (Fed schedule)
+    assert fomc_day("2026-06-16") == 0.0
+    assert fomc_eve("2026-06-16") == 1.0       # session before the decision
+    assert fomc_eve("2026-06-17") == 0.0
+    assert fomc_day("2012-06-20") is None      # outside coverage → no read
+    # Friday → next weekday is Monday: eve of a Monday decision would carry
+    assert fomc_eve("2026-06-12") == 0.0
+
+
+def test_feature_vector_calendar_and_rel():
+    ctx = {"date": "2026-06-17", "und_vol20": 0.02, "und_rel20": 0.05}
+    v = adaptive.feature_vector(ctx, [])
+    assert len(v) == len(adaptive.FEATURES)
+    assert v[adaptive.FEATURES.index("fomc")] == 1.0
+    assert v[adaptive.FEATURES.index("dow_mon")] == 0.0   # 6/17/2026 = Wed
+    assert v[adaptive.FEATURES.index("rel_qqq")] > 0
+    mon = adaptive.feature_vector({"date": "2026-06-15",
+                                   "und_vol20": 0.02}, [])
+    assert mon[adaptive.FEATURES.index("dow_mon")] == 1.0
+
+
+# ── OOS anchoring (확신을 관측 적중률에 정박) ─────────────────────────────────
+def test_recalibrate_prob_anchors_and_preserves_side():
+    good = {"55-58%": {"n": 900, "wins": 540}}     # observed 60%
+    p = adaptive.recalibrate_prob(0.56, good)
+    assert 0.55 < p < 0.61                          # anchored near observed
+    bad = {"55-58%": {"n": 900, "wins": 400}}       # observed 44% — refuted
+    p2 = adaptive.recalibrate_prob(0.56, bad)
+    assert p2 == pytest.approx(0.5005)              # floored, side preserved
+    p3 = adaptive.recalibrate_prob(0.44, bad)
+    assert p3 == pytest.approx(0.4995)              # bear side preserved
+    empty = adaptive.recalibrate_prob(0.70, {})
+    assert empty == pytest.approx(0.5005)           # no evidence → no claim
+
+
+def test_walk_forward_with_raw_returns_both():
+    rng = np.random.default_rng(3)
+    n = 300
+    X = rng.normal(size=(n, len(adaptive.FEATURES))).clip(-1, 1).tolist()
+    labels = [0.01 * x[2] for x in X]
+    probs, raw = adaptive.walk_forward_probs(X, labels, min_train=120,
+                                             with_raw=True)
+    assert len(probs) == len(raw) == n
+    scored = [(p, r) for p, r in zip(probs, raw, strict=True) if p is not None]
+    # anchoring never flips the raw side
+    assert all((p > 0.5) == (r > 0.5) for p, r in scored)
+
+
+# ── calibration ledger (확신 구간별 적중률 원장) ──────────────────────────────
+def test_bucket_of_symmetry_and_edges():
+    from surge.duel import calibration as cal
+
+    assert cal.bucket_of(0.56) == cal.bucket_of(0.44) == "55-58%"
+    assert cal.bucket_of(0.51) == "50-53%"
+    assert cal.bucket_of(0.99) == "62%+"
+
+
+def test_replay_calibration_persists_and_anchors_lookup(tmp_path, monkeypatch):
+    from surge.duel import calibration as cal
+
+    db = tmp_path / "c.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_adaptive_min_train", 40)
+
+    res = cal.replay_calibration("soxl_soxs", frames=_frames(n=260))
+    assert res["n_scored"] > 150
+    rows = cal.table("soxl_soxs")
+    assert sum(r["replay_n"] for r in rows) == res["n_scored"]
+    # the perfect-lead synthetic concentrates in a high-accuracy bucket
+    top = [r for r in rows if r["replay_n"] > 0][-1]
+    assert top["replay_acc"] > 0.9
+    # live anchoring uses the stored RAW map; falls back to raw without one
+    p = cal.anchor_live_prob("soxl_soxs", 0.95)
+    assert p > 0.55                                  # evidenced → keeps claim
+    assert cal.anchor_live_prob("nope_pair", 0.61) == 0.61   # no ledger
+
+
+def test_tonight_persists_live_context(tmp_path, monkeypatch):
+    import json as _json
+
+    db = tmp_path / "lc.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+
+    frames = _frames(n=120, lead=+1)
+    last = frames["SOXX"]["date"].iloc[-1]
+    dlive.tonight(frames=frames, with_futures=False, session_date=last)
+    with connect(db) as conn:
+        row = conn.execute("SELECT * FROM duel_live_context").fetchone()
+    assert row["pair"] == "soxl_soxs" and row["decision_date"] == last
+    ctx = _json.loads(row["ctx"])
+    assert "und_vol20" in ctx and "asia" in ctx      # numeric snapshot frozen

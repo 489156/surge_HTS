@@ -330,6 +330,32 @@ CREATE TABLE IF NOT EXISTS adaptive_weights (
 );
 CREATE INDEX IF NOT EXISTS idx_aw_pair_date ON adaptive_weights(pair, decision_date);
 
+-- ── Conviction calibration ledger (확신 구간별 적중률 원장) ──────────────────
+-- Per (pair, probability-bucket, source): how often calls in that conviction
+-- bucket actually hit. source='replay' is refreshed from the walk-forward
+-- archive replay; the forward side is computed live from duel_variants.
+CREATE TABLE IF NOT EXISTS adaptive_calibration (
+    pair        TEXT NOT NULL,
+    bucket      TEXT NOT NULL,
+    source      TEXT NOT NULL,            -- 'replay' (forward is computed live)
+    n           INTEGER NOT NULL DEFAULT 0,
+    wins        INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (pair, bucket, source)
+);
+
+-- ── Live decision context, point-in-time (선물 등 라이브 전용 변인의 박제) ────
+-- Everything the evening call SAW, frozen at commit time. Live-only reads
+-- (NQ futures, later options/IV) become learnable variables once enough
+-- nights accumulate here — without this table they evaporate every morning.
+CREATE TABLE IF NOT EXISTS duel_live_context (
+    pair          TEXT NOT NULL,
+    decision_date TEXT NOT NULL,
+    ctx           TEXT NOT NULL,          -- JSON snapshot (numeric reads only)
+    captured_at   TEXT NOT NULL,
+    PRIMARY KEY (pair, decision_date)
+);
+
 -- ── Secured price history — the duel research archive ───────────────────────
 -- Daily bars for every pair leg/underlying + macro/Asia series, persisted so
 -- backtests and research never depend on a live vendor being up.

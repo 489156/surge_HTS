@@ -24,6 +24,7 @@ from ..sources import market
 from .pairs import DEFAULT_PAIR, get_pair
 
 MACRO_SYMBOLS = ["^VIX", "^TNX"]
+MARKET_PROXY = "QQQ"          # relative-strength benchmark (semis vs broad tech)
 ASIA = {  # name -> (ticker, weight within the Asia composite)
     "TSMC": ("2330.TW", 0.40),
     "Samsung": ("005930.KS", 0.30),
@@ -62,6 +63,9 @@ def fetch_shared(period: str = "2y") -> dict[str, pd.DataFrame]:
         df = market.download_ohlcv([ticker], period=period)
         if not df.empty:                              # absent ⇒ those factors stay silent
             frames[name] = _tidy(df)
+    df = market.download_ohlcv([MARKET_PROXY], period=period)
+    if not df.empty:                                  # relative-strength benchmark
+        frames[MARKET_PROXY] = _tidy(df)
     return frames
 
 
@@ -126,6 +130,14 @@ def prepare(frames: dict[str, pd.DataFrame], pair: dict | None = None,
         # the moment the committed rule enters. Used ONLY by the gap guard —
         # never as a decision feature (the call itself is committed pre-open).
         s["gap_ret"] = gap
+        # relative strength vs the broad-tech proxy (leak-safe, D−1): is the
+        # pair's sector out/under-running the market it trades inside of?
+        proxy = frames.get(MARKET_PROXY)
+        if proxy is not None and und != MARKET_PROXY:
+            q = _tidy(proxy) if "date" in proxy.columns else proxy
+            rel = (s["close"].pct_change(20)
+                   - q["close"].pct_change(20).reindex(s.index))
+            s["f_rel20"] = rel.shift(1)
         out[und] = s
 
     if "^VIX" in frames:
@@ -166,7 +178,7 @@ def _base_ctx(pair: dict, date: str) -> dict:
         "date": date, "pair": pair, "underlying": pair["underlying"],
         "und_ret1": None, "und_ret5": None, "und_vol20": None,
         "und_sma50_dist": None, "und_oc_mom5": None, "und_oc1": None,
-        "und_gap1": None, "vix_level": None, "vix_chg": None,
+        "und_gap1": None, "und_rel20": None, "vix_level": None, "vix_chg": None,
         "tnx_chg": None, "credit_chg": None, "dollar_chg": None,
         "bonds_chg": None, "asia": {}, "futures_ret": None, "atr_pct": {},
     }
@@ -189,7 +201,7 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
         und_vol20=float(row["f_vol20"]), und_sma50_dist=float(row["f_sma50_dist"]),
     )
     for key, col in (("und_oc_mom5", "f_oc_mom5"), ("und_oc1", "f_oc1"),
-                     ("und_gap1", "f_gap1")):
+                     ("und_gap1", "f_gap1"), ("und_rel20", "f_rel20")):
         v = row.get(col)
         if v is not None and not pd.isna(v):
             ctx[key] = float(v)
@@ -245,6 +257,12 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
         ctx["und_oc1"] = float(oc.iloc[-1])
     if not pd.isna(gap.iloc[-1]):
         ctx["und_gap1"] = float(gap.iloc[-1])
+    proxy = prepared.get(MARKET_PROXY)
+    if (proxy is not None and pair["underlying"] != MARKET_PROXY
+            and len(proxy) >= 21 and len(closes) >= 21):
+        ctx["und_rel20"] = float(
+            (closes.iloc[-1] / closes.iloc[-21] - 1)
+            - (proxy["close"].iloc[-1] / proxy["close"].iloc[-21] - 1))
     vix = prepared.get("^VIX")
     if vix is not None and len(vix) >= 2:
         ctx["vix_level"] = float(vix["close"].iloc[-1])
@@ -313,7 +331,7 @@ def frames_from_archive(pair: dict | None = None) -> dict[str, pd.DataFrame]:
     pair = pair or get_pair(DEFAULT_PAIR)
     name_by_ticker = {t: n for n, (t, _w) in ASIA.items()}
     wanted = [pair["bull"], pair["bear"], pair["underlying"], *MACRO_SYMBOLS,
-              *name_by_ticker]
+              MARKET_PROXY, *name_by_ticker]
     frames: dict[str, pd.DataFrame] = {}
     with connect() as conn:
         for sym in wanted:

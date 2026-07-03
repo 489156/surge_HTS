@@ -109,11 +109,14 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     except Exception as exc:  # noqa: BLE001 — the learner must never break the call
         logger.debug("adaptive shadow skipped for {}: {}", pair_id, exc)
         prob = None
-    if prob is not None and settings.duel_use_adaptive:
-        d = decide_adaptive(ctx, prob, entry_ref=refs,
-                            components=d.components)
+    if prob is not None:
+        if settings.duel_use_adaptive:
+            d = decide_adaptive(ctx, prob, entry_ref=refs,
+                                components=d.components)
+        d.shadow_prob = prob        # card cites conviction WITH its evidence
 
     _persist(d)
+    _persist_ctx(pair, ctx)         # point-in-time archive of live-only reads
     variants.capture(pair, d.date, d.components)   # shadow A/B (re-weight existing)
     factors.record(pair, d.date, ctx)              # shadow FACTORS ("what to add?")
     try:                                           # AMVF/ADVCRF/NGRF basket factors
@@ -156,11 +159,31 @@ def _adaptive_shadows(pair: dict, ctx: dict, components) -> float | None:
         if model is None:
             continue
         p = model.prob_up(feats)
-        variants.capture_external(name, pair, ctx["date"], 2.0 * p - 1.0)
         if name == "adaptive":
+            # anchor claimed conviction to the observed OOS hit rate of its
+            # bucket (ledger refreshed nightly by `surge adaptive --calibrate`)
+            from .calibration import anchor_live_prob
+
+            p = anchor_live_prob(pair["id"], p)
             base_prob = p
             adaptive.record_weights(pair, ctx["date"], model)
+        variants.capture_external(name, pair, ctx["date"], 2.0 * p - 1.0)
     return base_prob
+
+
+def _persist_ctx(pair: dict, ctx: dict) -> None:
+    """Freeze the numeric context the call saw (futures and any other
+    live-only read included) — the raw material future learners train on."""
+    numeric = {k: v for k, v in ctx.items()
+               if isinstance(v, int | float) or v is None}
+    numeric["asia"] = {k: dict(v) for k, v in (ctx.get("asia") or {}).items()}
+    numeric["atr_pct"] = dict(ctx.get("atr_pct") or {})
+    with connect() as conn:
+        db_upsert(conn, "duel_live_context", [{
+            "pair": pair["id"], "decision_date": ctx["date"],
+            "ctx": json.dumps(numeric, ensure_ascii=False),
+            "captured_at": utc_now(),
+        }], immutable=("captured_at",))
 
 
 def _persist(d: DuelDecision) -> None:

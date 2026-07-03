@@ -133,8 +133,13 @@ class Settings(BaseSettings):
     duel_use_adaptive: bool = False
     duel_adaptive_min_train: int = 120     # sessions before the learner may speak
     duel_adaptive_ridge: float = 4.0       # L2 shrinkage (9 features, ±1 labels)
-    duel_adaptive_band: float = 0.06       # |2p−1| below this → STAND_ASIDE
-    duel_adaptive_full: float = 0.20       # |2p−1| at/above this → full size
+    # Bands act on ANCHORED probabilities (recalibrated to the observed OOS
+    # hit rate of the conviction bucket — see adaptive.recalibrate_prob), so
+    # |2p−1| IS the evidenced edge: 0.05 = "this bucket has actually hit
+    # ≥52.5% out-of-sample", 0.10 = "≥55% observed". The anchored scale is
+    # compressed vs raw Platt output, hence lower thresholds than before.
+    duel_adaptive_band: float = 0.05       # |2p−1| below this → STAND_ASIDE
+    duel_adaptive_full: float = 0.10       # |2p−1| at/above this → full size
     # Shadow-variant A/B → promotion gate (forward, leak-free)
     variant_min_n: int = 30                # min independent scored days to judge
     variant_promote_z: float = 1.64        # one-sided 95% proportion z vs champion

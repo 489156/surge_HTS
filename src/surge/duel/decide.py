@@ -34,6 +34,10 @@ class DuelDecision:
     # (the signal is already pre-priced). None = no guard.
     gap_guard: float | None = None
     model: str = "champion"   # which engine produced this call (ledger honesty)
+    # The adaptive engine's calibrated P(up) for this session (set at call
+    # time for the card's conviction-with-evidence line; not persisted — the
+    # shadow variant row carries it into the forward ledger).
+    shadow_prob: float | None = None
 
     @property
     def reasons(self) -> list[str]:

@@ -124,6 +124,8 @@ _PRIMARY_KEYS = {
     "rotation_decisions": "decision_date, ticker",
     "watch_levels": "asof, ticker, horizon",
     "adaptive_weights": "pair, decision_date, feature",
+    "adaptive_calibration": "pair, bucket, source",
+    "duel_live_context": "pair, decision_date",
 }
 
 

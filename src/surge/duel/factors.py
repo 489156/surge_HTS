@@ -128,6 +128,27 @@ def _prev_intraday_follow(ctx: dict) -> float | None:
     return _clip(math.tanh(v / vol / 1.5))
 
 
+def _rel_strength(ctx: dict) -> float | None:
+    """Sector vs broad-tech (QQQ) 20d relative strength CONTINUES — leaders
+    keep leading intraday. Silent for the QQQ-underlying pair."""
+    v, vol = ctx.get("und_rel20"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / (vol * math.sqrt(20)) / 1.5))
+
+
+def _fomc_eve_drift(ctx: dict) -> float | None:
+    """The documented pre-FOMC announcement drift: long bias the session
+    BEFORE a decision day. Fires only on eve days (None otherwise — the
+    factor race scores it exclusively on its own event days)."""
+    from .calendar import fomc_eve
+
+    e = fomc_eve(ctx.get("date") or "")
+    if not e:
+        return None
+    return 0.6
+
+
 CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "asia_breadth": _asia_breadth,
     "und_accel": _und_accel,
@@ -141,6 +162,8 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "intraday_mom": _intraday_mom,
     "prev_gap_follow": _prev_gap_follow,
     "prev_intraday_follow": _prev_intraday_follow,
+    "rel_strength": _rel_strength,
+    "fomc_eve_drift": _fomc_eve_drift,
 }
 
 _MIN_CONVICTION = 0.05   # |value| below this = no directional call (not scored)

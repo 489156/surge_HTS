@@ -359,6 +359,20 @@ def _print_duel_card(d, pair: dict) -> None:
         print(f"  비중: 자본의 {d.size_pct*100:.0f}% "
               f"(예: ${settings.starting_capital:,.0f} 기준 "
               f"${settings.starting_capital*d.size_pct:,.0f})")
+    if d.shadow_prob is not None:
+        from .duel import calibration
+        p = d.shadow_prob
+        line = f"  적응 엔진: P(상승) {p*100:.1f}%"
+        look = calibration.lookup(d.pair_id, p)
+        if look:
+            line += f" — 이 확신 구간({look['bucket']})의 과거 적중률:"
+            if look["replay_acc"] is not None:
+                line += (f" {look['replay_acc']*100:.1f}%"
+                         f" (리플레이 n={look['replay_n']:,})")
+            if look["forward_n"]:
+                line += (f" · 전진 {look['forward_acc']*100:.0f}%"
+                         f" (n={look['forward_n']})")
+        print(line)
     print("  근거:")
     for r in d.reasons:
         print(f"   · {r}")
@@ -745,6 +759,28 @@ def _cmd_adaptive(args) -> int:
     if unknown:
         print(f"  알 수 없는 페어: {unknown} — 선택지: {', '.join(PAIRS)} 또는 all")
         return 1
+
+    if args.calibrate:
+        from .duel import calibration
+        for pid in pair_ids:
+            res = calibration.replay_calibration(pid, offline=args.offline,
+                                                 period=args.period)
+            if "error" in res:
+                print(f"\n  [{pid}] {res['error']}")
+                continue
+            print(f"\n  확신 구간별 적중률 [{pid}] — 리플레이(전량 OOS) + 전진 기록")
+            print(f"  {'구간':<8} {'리플레이 n':>10} {'적중률':>7} "
+                  f"{'전진 n':>7} {'적중률':>7}")
+            for row in calibration.table(pid):
+                ra = (f"{row['replay_acc']*100:5.1f}%"
+                      if row["replay_acc"] is not None else "    —")
+                fa = (f"{row['forward_acc']*100:5.1f}%"
+                      if row["forward_acc"] is not None else "    —")
+                print(f"  {row['bucket']:<8} {row['replay_n']:>10,} {ra:>7} "
+                      f"{row['forward_n']:>7} {fa:>7}")
+        print("\n  ※ 밤 카드가 이 표에서 자기 확신 구간의 성적을 인용한다."
+              " 전진 열이 최종 심판.\n")
+        return 0
 
     if args.replay:
         from .duel import backtest as duel_bt
@@ -1225,9 +1261,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--replay", action="store_true",
                     help="run the OOS config race over history (evidence, "
                          "not the final judge)")
+    sp.add_argument("--calibrate", action="store_true",
+                    help="확신 구간별 적중률 원장 갱신 (리플레이 OOS → 박제)")
     sp.add_argument("--offline", action="store_true",
                     help="use the price_history archive instead of live fetch")
-    sp.add_argument("--period", default="2y", help="look-back for --replay")
+    sp.add_argument("--period", default="2y",
+                    help="look-back for --replay/--calibrate")
     sp.set_defaults(func=_cmd_adaptive)
 
     sub.add_parser("report", help="one-screen daily duel report"

@@ -31,7 +31,10 @@ import numpy as np
 COMPONENT_FEATURES = ("asia_lead", "trend", "momentum_5d", "vix_regime",
                       "rates", "mean_reversion")
 INTRADAY_FEATURES = ("oc_mom5", "oc1", "gap1")
-FEATURES = (*COMPONENT_FEATURES, *INTRADAY_FEATURES)
+MARKET_FEATURES = ("rel_qqq",)                    # sector vs broad-tech proxy
+CALENDAR_FEATURES = ("dow_mon", "dow_fri", "fomc", "fomc_eve")
+FEATURES = (*COMPONENT_FEATURES, *INTRADAY_FEATURES,
+            *MARKET_FEATURES, *CALENDAR_FEATURES)
 
 # ── the learner's OWN hyperparameters as racing hypotheses ───────────────────
 # The recursive step: not only the factor weights but the *estimator itself*
@@ -48,6 +51,8 @@ CONFIGS: dict[str, dict] = {
     "adaptive_loose": {"ridge_lambda": 1.0},     # lighter shrinkage
     "adaptive_intraday": {"features": INTRADAY_FEATURES},   # new variables only
     "adaptive_votes": {"features": COMPONENT_FEATURES},     # legacy votes only
+    "adaptive_nocal": {"features": (*COMPONENT_FEATURES, *INTRADAY_FEATURES,
+                                    *MARKET_FEATURES)},     # calendar ablation
 }
 
 
@@ -89,7 +94,30 @@ def feature_vector(ctx: dict, components) -> list[float]:
     out.append(_clip(math.tanh((oc5 or 0.0) / (vol / math.sqrt(5)) / 1.5)))
     out.append(_clip(math.tanh((oc1 or 0.0) / vol / 1.5)))
     out.append(_clip(math.tanh((gap1 or 0.0) / vol / 1.5)))
+    # relative strength: 20d horizon → scale by √20·σ
+    rel = ctx.get("und_rel20")
+    out.append(_clip(math.tanh((rel or 0.0) / (vol * math.sqrt(20)) / 1.5)))
+    # calendar variables — deterministic functions of the session date; the
+    # learner estimates their drift coefficients (e.g. pre-FOMC drift) itself
+    out.extend(_calendar_reads(ctx.get("date") or ""))
     return out
+
+
+def _calendar_reads(date: str) -> list[float]:
+    from .calendar import fomc_day, fomc_eve
+
+    try:
+        import datetime as _dt
+
+        wd = _dt.date.fromisoformat(date).weekday()
+    except (ValueError, TypeError):
+        wd = None
+    return [
+        1.0 if wd == 0 else 0.0,          # dow_mon
+        1.0 if wd == 4 else 0.0,          # dow_fri
+        fomc_day(date) or 0.0,            # fomc (None outside coverage → 0)
+        fomc_eve(date) or 0.0,            # fomc_eve
+    ]
 
 
 # ── closed-form ridge + Platt calibration ────────────────────────────────────
@@ -259,17 +287,51 @@ def training_set(prep: dict, pair: dict,
     return dates, X, y
 
 
+# ── OOS re-calibration: anchor claimed conviction to OBSERVED hit rates ─────
+# The training-window Platt can be non-monotone out-of-sample (we measured a
+# 55–58% bucket hitting 49% while 58–62% hit 56%). The honest fix is to map
+# each raw probability through the accuracy its conviction bucket has ACTUALLY
+# achieved on past out-of-sample predictions — the ledger itself becomes the
+# calibrator. Direction is never flipped (accuracy is floored at 0.5): a
+# bucket with a bad record deflates toward "no opinion" instead of inverting.
+_RECAL_SMOOTHING = 100     # Laplace-style prior weight toward 0.5
+
+
+def recalibrate_prob(raw_p: float, tally: dict[str, dict]) -> float:
+    """raw P(up) + {bucket: {n, wins}} of past OOS raw predictions → P(up)
+    anchored to that bucket's observed hit rate (side-preserving, ≥0.5)."""
+    from .calibration import bucket_of
+
+    b = tally.get(bucket_of(raw_p))
+    n, wins = (b["n"], b["wins"]) if b else (0, 0)
+    acc = (wins + 0.5 * _RECAL_SMOOTHING) / (n + _RECAL_SMOOTHING)
+    # Floor at 0.5 + ε: a bucket with a bad record deflates to "no opinion"
+    # (any band ignores 0.0005 of edge) but the SIDE stays readable for
+    # always-commit consumers (the variant race) — never silently flipped.
+    edge = max(acc - 0.5, 0.0005)
+    return 0.5 + edge if raw_p > 0.5 else 0.5 - edge
+
+
 def walk_forward_probs(X: list[list[float]], labels: list[float],
                        ridge_lambda: float = 4.0, min_train: int = 120,
                        refit_every: int = 5, window: int | None = None,
                        features: tuple[str, ...] = FEATURES,
-                       ) -> list[float | None]:
+                       recalibrate: bool = True, with_raw: bool = False,
+                       ) -> list[float | None] | tuple[list[float | None],
+                                                       list[float | None]]:
     """P(up) for each session using ONLY strictly-prior sessions (expanding
     window, or the trailing `window` sessions when set). `None` until
     `min_train` history exists. Refits every `refit_every` sessions
     (closed-form is cheap; 5 keeps long replays fast without letting the
-    model go stale)."""
+    model go stale). With `recalibrate` (default) each raw probability is
+    re-anchored to the observed hit rate of its conviction bucket among the
+    PAST out-of-sample predictions only — leak-free by construction.
+    `with_raw` additionally returns the raw (pre-anchoring) series."""
+    from .calibration import BUCKETS, bucket_of
+
     out: list[float | None] = []
+    raw_out: list[float | None] = []
+    tally = {lab: {"n": 0, "wins": 0} for _l, _h, lab in BUCKETS}
     model: AdaptiveModel | None = None
     fitted_at = -1
     for i in range(len(X)):
@@ -277,5 +339,14 @@ def walk_forward_probs(X: list[list[float]], labels: list[float],
             model = fit(X[:i], labels[:i], ridge_lambda, min_train,
                         window=window, features=features)
             fitted_at = i
-        out.append(model.prob_up(X[i]) if model is not None else None)
-    return out
+        if model is None:
+            out.append(None)
+            raw_out.append(None)
+            continue
+        raw = model.prob_up(X[i])
+        raw_out.append(raw)
+        out.append(recalibrate_prob(raw, tally) if recalibrate else raw)
+        b = tally[bucket_of(raw)]             # update AFTER emitting (no leak)
+        b["n"] += 1
+        b["wins"] += int((raw > 0.5) == (labels[i] > 0))
+    return (out, raw_out) if with_raw else out
