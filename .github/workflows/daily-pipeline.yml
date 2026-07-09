@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write              # allow the job to commit the updated SQLite state back
+  pages: write                 # publish the static read-only site (Phase 2)
+  id-token: write              # OIDC token for actions/deploy-pages
 
 concurrency:
   group: surge-pipeline
@@ -74,6 +76,35 @@ jobs:
             git push
           fi
 
-  # PHASE 2 (designed in docs/MIGRATION_GITHUB_ACTIONS.md, not yet wired): a `pages` job that
-  # exports the dashboard's /api/* responses to static JSON + a static index.html and publishes
-  # via GitHub Pages, so anyone with the repo's Pages URL can verify the daily results read-only.
+  # PHASE 2 (wired 2026-07-09): publish tonight's calls + verification ledgers as a
+  # static read-only page, so the daily results are viewable from any phone at the
+  # repo's Pages URL. One-time setup: repo Settings → Pages → Source: GitHub Actions.
+  pages:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main            # pick up the DB state the pipeline job just pushed
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Export the static site from the fresh DB
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          surge pages-export --out site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

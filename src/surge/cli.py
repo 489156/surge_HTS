@@ -874,6 +874,15 @@ def _cmd_verify(_args) -> int:
     return 0
 
 
+def _cmd_pages_export(args) -> int:
+    from .dashboard.export import export_site
+
+    res = export_site(args.out)
+    print(f"\n  정적 사이트 내보냄 → {res['outdir']}/index.html "
+          f"(세션 {res['date']}, 콜 카드 {res['cards']}개)\n")
+    return 0
+
+
 def _cmd_duel_eval(_args) -> int:
     from . import learn
     from .duel import live as duel_live
@@ -1300,6 +1309,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("verify", help="빠른 확신 검증 (교차풀링·프라이어워밍 e-value)"
                    ).set_defaults(func=_cmd_verify)
+
+    sp = sub.add_parser("pages-export",
+                        help="정적 사이트 내보내기 (GitHub Pages/모바일 열람)")
+    sp.add_argument("--out", default="site", help="output directory")
+    sp.set_defaults(func=_cmd_pages_export)
 
     sub.add_parser("report", help="one-screen daily duel report"
                    ).set_defaults(func=_cmd_report)
