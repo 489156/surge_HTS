@@ -13,3 +13,6 @@ __pycache__/
 # Everything else under data/ (logs, dumps, scratch) stays local.
 data/*
 !data/surge.db
+
+# Phase 2 static export (built by CI, never committed)
+site/

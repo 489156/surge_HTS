@@ -845,6 +845,44 @@ def _cmd_adaptive(args) -> int:
     return 0
 
 
+def _cmd_verify(_args) -> int:
+    """빠른 확신 검증 현황: 교차풀링(엔진 1개 가설을 전 페어 관측으로) + 프라이어
+    워밍 + McNemar 페어드로, 페어별 수년 걸리던 검증을 패밀리 단위 수개월로 단축."""
+    from .duel import verify
+
+    s = verify.status()
+    fam = s["family"]
+    thr = fam["threshold"]
+    mark = "✅ 검증됨" if fam["verified"] else "⏳ 축적중"
+    print(f"\n  패밀리(엔진) 검증 — 교차풀링 e-value {fam['e_pooled']:.2f} "
+          f"/ 임계 {thr:g}  {mark}")
+    print(f"  (전 페어 불일치 세션 {fam['n_discordant']}건 · {fam['n_pairs']}페어 풀링)")
+    print(f"\n  {'페어':<12} {'전진n':>6} {'프라이어':>7} {'e(워밍)':>9} "
+          f"{'e(기존)':>9} {'상태':>10} {'투영세션':>8}")
+    for p in s["pairs"]:
+        pr = f"{p['prior_rate']*100:.1f}%" if p["prior_rate"] is not None else "—"
+        state = ("✅검증" if p["verified"] else
+                 "🟢잠정" if p["provisional"] else "⏳축적")
+        proj = str(p["projected_sessions"]) if p["projected_sessions"] else "—"
+        print(f"  {p['pair']:<12} {p['n_forward']:>6} {pr:>7} "
+              f"{p['e_warm']:>9.2f} {p['e_flat']:>9.2f} {state:>10} {proj:>8}")
+    if not any(p["n_forward"] for p in s["pairs"]):
+        print("\n  전진 기록이 아직 없습니다 — `surge duel`(야간) + `surge duel-eval`"
+              "(익일 채점)이 쌓기 시작하면 이 표가 채워집니다.")
+    print("\n  ※ 워밍 프라이어는 베팅 크기만 조정 — 증거는 전진 데이터에서만."
+          " 잠정(🟢)=패밀리 검증됨 + 이 페어가 유의하게 나쁘지 않음.\n")
+    return 0
+
+
+def _cmd_pages_export(args) -> int:
+    from .dashboard.export import export_site
+
+    res = export_site(args.out)
+    print(f"\n  정적 사이트 내보냄 → {res['outdir']}/index.html "
+          f"(세션 {res['date']}, 콜 카드 {res['cards']}개)\n")
+    return 0
+
+
 def _cmd_duel_eval(_args) -> int:
     from . import learn
     from .duel import live as duel_live
@@ -1268,6 +1306,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--period", default="2y",
                     help="look-back for --replay/--calibrate")
     sp.set_defaults(func=_cmd_adaptive)
+
+    sub.add_parser("verify", help="빠른 확신 검증 (교차풀링·프라이어워밍 e-value)"
+                   ).set_defaults(func=_cmd_verify)
+
+    sp = sub.add_parser("pages-export",
+                        help="정적 사이트 내보내기 (GitHub Pages/모바일 열람)")
+    sp.add_argument("--out", default="site", help="output directory")
+    sp.set_defaults(func=_cmd_pages_export)
 
     sub.add_parser("report", help="one-screen daily duel report"
                    ).set_defaults(func=_cmd_report)

@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     # compressed vs raw Platt output, hence lower thresholds than before.
     duel_adaptive_band: float = 0.05       # |2p−1| below this → STAND_ASIDE
     duel_adaptive_full: float = 0.10       # |2p−1| at/above this → full size
+    # Rapid verification (duel/verify.py): pseudo-observations used to warm the
+    # plug-in e-process bet with the replay hit rate. Shapes the BET only, never
+    # the evidence — e still starts at 1.0 and grows solely from forward data.
+    # ~15 recovers most of the plug-in warmup cost without letting the prior
+    # dominate a genuinely divergent live regime (the forward record overturns
+    # a wrong prior within a few dozen discordant sessions). 0 = old flat start.
+    verify_prior_weight: float = 15.0
     # Shadow-variant A/B → promotion gate (forward, leak-free)
     variant_min_n: int = 30                # min independent scored days to judge
     variant_promote_z: float = 1.64        # one-sided 95% proportion z vs champion

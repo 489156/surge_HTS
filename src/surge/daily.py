@@ -140,6 +140,20 @@ def run_daily(write: bool = True) -> dict:
         return out
     variables = _safe("variables", _variables, warnings) or {}
 
+    # ── 2.7 RAPID VERIFY — cross-sectional pooled + prior-warmed e-value: the
+    # family (engine) verdict a new pair inherits, cutting per-pair years to
+    # family months (see duel/verify.py). Surfaced, not a live-flip gate. ──
+    def _verify() -> dict:
+        from .duel.verify import status as vstatus
+
+        v = vstatus()
+        return {"family_e": v["family"]["e_pooled"],
+                "family_verified": v["family"]["verified"],
+                "pairs_verified": [p["pair"] for p in v["pairs"] if p["verified"]],
+                "pairs_provisional": [p["pair"] for p in v["pairs"]
+                                      if p["provisional"]]}
+    verify_status = _safe("verify", _verify, warnings) or {}
+
     # ── 3. JUDGE — current evidence per strategy (the truth gate) ──
     strategies = _safe("verdict", V.assess, warnings) or []
     headline = _safe("headline", V.headline, warnings) or "—"
@@ -181,6 +195,7 @@ def run_daily(write: bool = True) -> dict:
         "evidence": evidence,
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed
+        "verify": verify_status,          # 빠른 확신 검증 (교차풀링 + 프라이어워밍)
         "variables": variables,           # 변인 추정 드리프트 (adaptive weight trace)
         "cadence": cadence,               # freshness of duel/rotation/surge inputs
         "stale_inputs": stale_inputs,     # which (if any) appear to have a stalled schedule
