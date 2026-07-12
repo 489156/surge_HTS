@@ -62,6 +62,24 @@ CONFIGS: dict[str, dict] = {
     "adaptive_nocal": {"features": (*COMPONENT_FEATURES, *INTRADAY_FEATURES,
                                     *MARKET_FEATURES)},     # calendar ablation
     "adaptive_tech": {"features": FEATURES},     # + RSI/RVOL (candidacy race)
+    # Deterministic "analyst desk" — the multi-agent debate architecture
+    # (TradingAgents et al.) translated into this repo's discipline: role-
+    # separated EXPERTS (one walk-forward ridge per desk below) each argue a
+    # signed conviction, and a level-2 walk-forward JUDGE learns how much to
+    # trust each desk. Same adversarial-synthesis idea, zero LLM tokens,
+    # fully reproducible and leak-free (see stacked_walk_forward_probs).
+    "adaptive_debate": {"stacked": True},
+}
+
+# The desks. Each is a feature subset = one "analyst" with its own worldview.
+DESKS: dict[str, tuple[str, ...]] = {
+    "asia": ("asia_lead",),
+    "macro": ("vix_regime", "rates"),
+    "trend": ("trend", "momentum_5d", "mean_reversion"),
+    "intraday": INTRADAY_FEATURES,
+    "market": MARKET_FEATURES,
+    "tech": TECH_FEATURES,
+    "calendar": CALENDAR_FEATURES,
 }
 
 
@@ -219,11 +237,24 @@ def fit(X: list[list[float]], labels: list[float], ridge_lambda: float = 4.0,
 
 def fit_config(X: list[list[float]], labels: list[float],
                config: str = "adaptive") -> AdaptiveModel | None:
-    """fit() under a named CONFIGS entry (production defaults filled in)."""
+    """fit() under a named CONFIGS entry (production defaults filled in).
+    Stacked configs have no single flat model — use predict_config instead."""
+    if CONFIGS.get(config, {}).get("stacked"):
+        return None
     c = resolve_config(config)
     return fit(X, labels, ridge_lambda=c["ridge_lambda"],
                min_train=c["min_train"], window=c["window"],
                features=c["features"])
+
+
+def predict_config(X: list[list[float]], labels: list[float],
+                   feats_tonight: list[float], config: str) -> float | None:
+    """Tonight's P(up) for ANY config, including stacked: append tonight's
+    feature row with a placeholder label and take the walk-forward's final
+    emission — which, by construction, is computed from strictly-prior
+    sessions only (the placeholder label is never read for that emission)."""
+    probs = probs_for_config([*X, feats_tonight], [*labels, 0.0], config)
+    return probs[-1]
 
 
 # ── 변인 추정 박제 — the nightly weight trace ─────────────────────────────────
@@ -271,6 +302,83 @@ def weight_drift(pair_id: str, back: int = 20) -> dict | None:
     return {"current": cur, "previous": old, "drift": drift,
             "sign_flips": sorted(flips),
             "top_drift": sorted(drift, key=lambda f: -abs(drift[f]))[:3]}
+
+
+def stacked_walk_forward_probs(X: list[list[float]], labels: list[float],
+                               ridge_lambda: float = 4.0, min_train: int = 120,
+                               refit_every: int = 10,
+                               recalibrate: bool = True,
+                               with_raw: bool = False,
+                               ) -> list[float | None] | tuple[list[float | None],
+                                                               list[float | None]]:
+    """Two-level walk-forward: per-DESK expert ridges (level 1) feed a level-2
+    judge ridge that learns, from PAST sessions only, how much each desk's
+    argument is worth. Leak-free at both levels by construction: the expert
+    score for session t is trained on sessions < t, and the judge for session
+    t is trained on (expert scores, label) pairs for sessions < t — which
+    themselves only ever saw their own pasts. Output is OOS-anchored like the
+    flat engine (same recalibrate machinery) unless recalibrate=False."""
+    import numpy as np
+
+    from .calibration import BUCKETS, bucket_of
+
+    n = len(X)
+    desk_names = list(DESKS)
+    # ── level 1: each desk's raw walk-forward P(up), reusing the flat engine ──
+    desk_probs = [
+        walk_forward_probs(X, labels, ridge_lambda=ridge_lambda,
+                           min_train=min_train, refit_every=refit_every,
+                           features=DESKS[d], recalibrate=False)
+        for d in desk_names
+    ]
+    # judge features: signed desk convictions (2p−1); 0 when a desk is silent
+    Z = [[(2.0 * desk_probs[j][i] - 1.0) if desk_probs[j][i] is not None else 0.0
+          for j in range(len(desk_names))] for i in range(n)]
+
+    out: list[float | None] = []
+    raw_out: list[float | None] = []
+    tally = {lab: {"n": 0, "wins": 0} for _l, _h, lab in BUCKETS}
+    w = None
+    platt = (1.0, 0.0)
+    fitted_at = -1
+    start = min_train + min_train // 2      # judge needs its own history of Z
+    for i in range(n):
+        if i < start:
+            out.append(None)
+            raw_out.append(None)
+            continue
+        if w is None or i - fitted_at >= refit_every:
+            Za = np.asarray(Z[:i], dtype=float)
+            ya = np.sign(np.asarray(labels[:i], dtype=float))
+            ya[ya == 0] = 1.0
+            w = fit_ridge(Za, ya, ridge_lambda)
+            platt = fit_platt(_ridge_score(Za, w), (ya > 0).astype(float))
+            fitted_at = i
+        s = float(_ridge_score(np.asarray([Z[i]], dtype=float), w)[0])
+        a, b = platt
+        raw = float(1.0 / (1.0 + math.exp(-max(-30, min(30, a * s + b)))))
+        raw_out.append(raw)
+        out.append(recalibrate_prob(raw, tally) if recalibrate else raw)
+        bkt = tally[bucket_of(raw)]
+        bkt["n"] += 1
+        bkt["wins"] += int((raw > 0.5) == (labels[i] > 0))
+    return (out, raw_out) if with_raw else out
+
+
+def probs_for_config(X: list[list[float]], labels: list[float],
+                     config: str = "adaptive", with_raw: bool = False):
+    """Walk-forward P(up) series under a named CONFIGS entry — dispatches the
+    stacked (analyst-desk) engine vs the flat one so race/backtest/calibration
+    treat every config uniformly."""
+    if CONFIGS.get(config, {}).get("stacked"):
+        c = resolve_config(config)
+        return stacked_walk_forward_probs(
+            X, labels, ridge_lambda=c["ridge_lambda"],
+            min_train=c["min_train"], with_raw=with_raw)
+    c = resolve_config(config)
+    return walk_forward_probs(
+        X, labels, ridge_lambda=c["ridge_lambda"], min_train=c["min_train"],
+        window=c["window"], features=c["features"], with_raw=with_raw)
 
 
 def training_set(prep: dict, pair: dict,

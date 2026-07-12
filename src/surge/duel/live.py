@@ -161,13 +161,17 @@ def _adaptive_shadows(pair: dict, ctx: dict, components) -> float | None:
     base_prob: float | None = None
     for name in adaptive.CONFIGS:
         try:
-            model = adaptive.fit_config(X, y, name)
+            if adaptive.CONFIGS[name].get("stacked"):
+                # analyst-desk engine: no single flat model — replay-and-append
+                p = adaptive.predict_config(X, y, feats, name)
+            else:
+                model = adaptive.fit_config(X, y, name)
+                p = model.prob_up(feats) if model is not None else None
         except Exception as exc:  # noqa: BLE001 — one config must not kill the race
             logger.debug("adaptive config {} skipped: {}", name, exc)
             continue
-        if model is None:
+        if p is None:
             continue
-        p = model.prob_up(feats)
         if name == "adaptive":
             # anchor claimed conviction to the observed OOS hit rate of its
             # bucket (ledger refreshed nightly by `surge adaptive --calibrate`)
