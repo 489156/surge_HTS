@@ -845,6 +845,38 @@ def _cmd_adaptive(args) -> int:
     return 0
 
 
+def _cmd_blindspot(_args) -> int:
+    """관망을 진단의 시작점으로: 원인별 관망 수 · 그날 섀도가 커밋했다면 맞았을
+    확률(would-have) · 그 사각지대를 메우러 레이스 중인 조건부 변인의 전진 성적."""
+    from .duel.blindspot import FILLS, report
+
+    r = report()
+    print(f"\n  관망 원인 진단 — 라벨 있는 관망 세션 {r['n_abstained']}건")
+    print(f"  {'원인':<10} {'건수':>4} {'would-have':>11} {'상승비율':>8}  fill 변인")
+    label = {"WEAK": "신호미약", "CONFLICT": "신호충돌",
+             "SILENT": "신호침묵", "CRISIS": "위기가드"}
+    for tag in ("WEAK", "CONFLICT", "SILENT", "CRISIS"):
+        b = r["causes"].get(tag)
+        if not b:
+            continue
+        wa = f"{b['would_acc']*100:.0f}%" if b["would_acc"] is not None else "—"
+        up = f"{b['up_rate']*100:.0f}%" if b["up_rate"] is not None else "—"
+        fills = ", ".join(FILLS.get(tag, ())) or "(의도적 없음)"
+        print(f"  {label[tag]:<10} {b['n']:>4} {wa:>11} {up:>8}  {fills}")
+    fr = r["fill_records"]
+    if fr:
+        print("\n  fill 변인 전진 성적 (팩터 레이스):")
+        for name, s in fr.items():
+            acc = f"{s['acc']*100:.0f}%" if s["acc"] is not None else "—"
+            print(f"   · {name:<24} n={s['n']:>4}  적중 {acc}")
+    else:
+        print("\n  fill 변인 전진 기록 없음 — 다음 야간 콜부터 자기 사각지대"
+              " 세션에서만 기록·채점됩니다.")
+    print("\n  ※ 승격 경로: fill이 기존 팩터 게이트(Šidák z)를 넘으면 변인 편입"
+          " 제안 → 피처 벡터 → 설정 레이스 → BASE (전 단계 증거 기반).\n")
+    return 0
+
+
 def _cmd_verify(_args) -> int:
     """빠른 확신 검증 현황: 교차풀링(엔진 1개 가설을 전 페어 관측으로) + 프라이어
     워밍 + McNemar 페어드로, 페어별 수년 걸리던 검증을 패밀리 단위 수개월로 단축."""
@@ -1309,6 +1341,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("verify", help="빠른 확신 검증 (교차풀링·프라이어워밍 e-value)"
                    ).set_defaults(func=_cmd_verify)
+
+    sub.add_parser("blindspot",
+                   help="관망 원인 진단 + 사각지대 fill 변인 레이스 현황"
+                   ).set_defaults(func=_cmd_blindspot)
 
     sp = sub.add_parser("pages-export",
                         help="정적 사이트 내보내기 (GitHub Pages/모바일 열람)")

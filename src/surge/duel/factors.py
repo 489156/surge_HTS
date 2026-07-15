@@ -163,6 +163,58 @@ def _fomc_eve_drift(ctx: dict) -> float | None:
     return 0.6
 
 
+# ── blind-spot fills (2026-07-15 결함 개선): conditional variables that fire
+# ONLY on the abstain-cause populations diagnosed by duel/blindspot.py — the
+# factor race then scores each fill exactly where the engine is blind. ───────
+def _session_cause(ctx: dict) -> str | None:
+    """Recompute tonight's components from ctx and classify the session the
+    same way blindspot.diagnose classifies archived ones (leak-safe: ctx is
+    D−1 information plus same-day Asia closes, identical to the live call)."""
+    from .blindspot import classify
+    from .signals import compute_signal
+
+    try:
+        sig = compute_signal(ctx)
+    except Exception:  # noqa: BLE001 — a broken ctx must never break recording
+        return None
+    comps = [{"name": c.name, "value": c.value, "weight": c.weight}
+             for c in sig["components"]]
+    return classify(comps)
+
+
+def _weak_drift(ctx: dict) -> float | None:
+    """WEAK(신호미약) fill: on no-information nights, the hypothesis is the
+    underlying's long drift. Fires only on WEAK sessions."""
+    if _session_cause(ctx) != "WEAK":
+        return None
+    return 0.4
+
+
+def _conflict_asia_tiebreak(ctx: dict) -> float | None:
+    """CONFLICT(신호충돌) fill: when strong reads cancel, let the structural
+    time-zone lead break the tie. Fires only on CONFLICT sessions with an
+    Asia read present."""
+    if _session_cause(ctx) != "CONFLICT":
+        return None
+    from .signals import asia_lead
+
+    a = asia_lead(ctx.get("asia") or {})
+    if a is None or abs(a.value) < 0.05:
+        return None
+    return _clip(a.value)
+
+
+def _silent_gap_follow(ctx: dict) -> float | None:
+    """SILENT(신호침묵) fill: when most desks have no read (Asia holiday
+    etc.), follow the prior session's gap direction."""
+    if _session_cause(ctx) != "SILENT":
+        return None
+    v, vol = ctx.get("und_gap1"), ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    return _clip(math.tanh(v / vol / 1.5))
+
+
 CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "asia_breadth": _asia_breadth,
     "und_accel": _und_accel,
@@ -179,6 +231,10 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "rel_strength": _rel_strength,
     "fomc_eve_drift": _fomc_eve_drift,
     "rsi_reversal": _rsi_reversal,
+    # blind-spot fills — raced exactly on the abstain-cause populations
+    "weak_drift": _weak_drift,
+    "conflict_asia_tiebreak": _conflict_asia_tiebreak,
+    "silent_gap_follow": _silent_gap_follow,
 }
 
 _MIN_CONVICTION = 0.05   # |value| below this = no directional call (not scored)
