@@ -124,8 +124,9 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     try:                            # options-flow snapshot (keyless, archive-only)
         from . import options
         options.record(pair["underlying"], d.date)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("options snapshot skipped for {}: {}", pair_id, exc)
+    except Exception as exc:  # noqa: BLE001 — collector must never break the call,
+        # but a stall must be VISIBLE in pipeline logs (2026-07-15 수리)
+        logger.warning("options snapshot skipped for {}: {}", pair_id, exc)
     variants.capture(pair, d.date, d.components)   # shadow A/B (re-weight existing)
     factors.record(pair, d.date, ctx)              # shadow FACTORS ("what to add?")
     try:                                           # AMVF/ADVCRF/NGRF basket factors

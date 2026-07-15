@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from surge.config import settings
 from surge.dashboard import export
 from surge.db import connect, init_db
@@ -57,6 +59,74 @@ def test_export_empty_db_is_degrade_safe(tmp_path, monkeypatch):
     data = json.loads((tmp_path / "site" / "data.json").read_text("utf-8"))
     assert data["calls"]["cards"] == []
     assert (tmp_path / "site" / "index.html").exists()
+
+
+def test_options_fallback_to_yahoo_direct(monkeypatch):
+    """yfinance path dead → the raw-endpoint path must still snapshot."""
+    import yfinance as yf
+
+    from surge.duel import options
+
+    class DeadTicker:
+        def __init__(self, sym):
+            raise RuntimeError("library broken")
+    monkeypatch.setattr(yf, "Ticker", DeadTicker)
+
+    payload = {"optionChain": {"result": [{
+        "quote": {"regularMarketPrice": 100.0},
+        "options": [{
+            "expirationDate": 1783468800,   # 2026-07-08 UTC
+            "calls": [{"strike": 100.0, "impliedVolatility": 0.6,
+                       "openInterest": 200, "volume": 20}],
+            "puts": [{"strike": 100.0, "impliedVolatility": 0.65,
+                      "openInterest": 100, "volume": 10}],
+        }],
+    }]}}
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            assert "options/SOXX" in url
+            return FakeResp()
+    monkeypatch.setattr(options.httpx, "Client", FakeClient)
+
+    snap = options.snapshot("SOXX")
+    assert snap["atm_iv"] == pytest.approx(0.625)
+    assert snap["pc_oi_ratio"] == pytest.approx(0.5)
+    assert snap["expiry"] == "2026-07-08"
+
+
+def test_options_both_paths_dead_returns_none(monkeypatch):
+    import yfinance as yf
+
+    from surge.duel import options
+
+    class DeadTicker:
+        def __init__(self, sym):
+            raise RuntimeError("library broken")
+    monkeypatch.setattr(yf, "Ticker", DeadTicker)
+
+    class DeadClient:
+        def __init__(self, *a, **k):
+            raise RuntimeError("network down")
+    monkeypatch.setattr(options.httpx, "Client", DeadClient)
+
+    assert options.snapshot("SOXX") is None      # warned, never raises
 
 
 def test_render_html_escapes_script_close():
