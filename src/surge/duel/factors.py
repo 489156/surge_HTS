@@ -240,6 +240,19 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
 _MIN_CONVICTION = 0.05   # |value| below this = no directional call (not scored)
 
 
+def all_factors() -> dict[str, Callable[[dict], float | None]]:
+    """Static candidates + SELF-GENERATED blind-spot fills (registered at
+    runtime by blindspot.generate_fills — the loop that turns a recurring
+    abstain cause into a new racing variable without a human in the middle)."""
+    from . import blindspot
+
+    out = dict(CANDIDATE_FACTORS)
+    for name, spec in blindspot.discovered_fills().items():
+        out[name] = (lambda ctx, n=name, s=spec:
+                     blindspot.eval_discovered(n, s, ctx))
+    return out
+
+
 # ── AMVF / ADVCRF / NGRF framework factors (read a basket-feature row) ────────
 def _na(x) -> bool:
     return x is None or x != x          # None or NaN (no pandas import needed)
@@ -293,7 +306,7 @@ def record(pair: dict, date: str, ctx: dict) -> int:
     """Persist every candidate factor's read for one (pair, date). Idempotent."""
     now = utc_now()
     rows = []
-    for name, fn in CANDIDATE_FACTORS.items():
+    for name, fn in all_factors().items():
         try:
             v = fn(ctx)
         except Exception:  # noqa: BLE001 — a broken candidate must never break the call

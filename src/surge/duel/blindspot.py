@@ -108,8 +108,10 @@ def diagnose(pair_id: str | None = None) -> dict:
 
 def fill_records() -> dict[str, dict]:
     """Forward records of the blind-spot fill candidates from the factor race
-    — did the variable secured for a cause actually predict on those days?"""
-    names = tuple(n for fills in FILLS.values() for n in fills)
+    — did the variable secured for a cause actually predict on those days?
+    Covers both the static seeds and the self-generated fills."""
+    names = tuple({*(n for fills in FILLS.values() for n in fills),
+                   *discovered_fills()})
     if not names:
         return {}
     ph = ",".join("?" for _ in names)
@@ -124,9 +126,142 @@ def fill_records() -> dict[str, dict]:
             for r in rows}
 
 
+# ── SELF-GENERATION: 새 사각지대 패턴 → 새 변인 자동 생성 ─────────────────────
+# The static FILLS above are the seed hypotheses. This layer makes the loop
+# GENERATIVE: a template library (signal × transform) is screened nightly
+# against each cause bucket's ARCHIVED sessions (duel_live_context carries the
+# exact ctx every call saw, point-in-time), and any (cause, template) pair
+# showing screening-level predictive power on that population is REGISTERED as
+# a discovered factor spec in model_state. From then on it records/scores in
+# the same factor race as every static candidate. Registration is a SCREEN,
+# not evidence — the forward race + Šidák gate remain the only judges.
+TEMPLATES: dict[str, str] = {          # template name → ctx key it leans on
+    "gap_follow": "und_gap1",
+    "rel_follow": "und_rel20",
+    "ocmom_follow": "und_oc_mom5",
+    "drift": "",                        # constant long bias (no ctx key)
+}
+SCREEN_MIN_N = 12
+SCREEN_MIN_ACC = 0.58
+
+
+def eval_template(template: str, ctx: dict) -> float | None:
+    """Directional read of one template on one ctx (shared by screening and
+    the live discovered-factor evaluator; leak-safe — ctx is D−1 info)."""
+    import math
+
+    if template == "drift":
+        return 0.4
+    key = TEMPLATES.get(template)
+    v = ctx.get(key) if key else None
+    vol = ctx.get("und_vol20")
+    if v is None or not vol:
+        return None
+    scale = vol * (20 ** 0.5) if key == "und_rel20" else vol
+    return max(-1.0, min(1.0, math.tanh(v / scale / 1.5)))
+
+
+def _abstained_ctx_rows(cause: str) -> list[tuple[dict, float]]:
+    """(archived ctx, label) for every labeled abstained session of `cause` —
+    the screening population, joined from the point-in-time context archive."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT d.components, d.reasons, d.soxx_oc_ret, c.ctx "
+            "FROM duel_decisions d "
+            "JOIN duel_live_context c ON c.pair=d.pair "
+            " AND c.decision_date=d.decision_date "
+            "WHERE d.side='STAND_ASIDE' AND d.soxx_oc_ret IS NOT NULL"
+        ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            comps = json.loads(r["components"]) if r["components"] else []
+            reasons = json.loads(r["reasons"]) if r["reasons"] else []
+            ctx = json.loads(r["ctx"]) if r["ctx"] else {}
+        except (ValueError, TypeError):
+            continue
+        if classify(comps, reasons) == cause:
+            out.append((ctx, float(r["soxx_oc_ret"])))
+    return out
+
+
+def generate_fills() -> list[str]:
+    """Nightly self-generation step: screen every (cause, template) pair —
+    AND its inversion, mirroring learn.propose_challengers' "an anti-predictive
+    read is itself a hypothesis, backwards" rule — on the cause's archived
+    population, and register survivors as discovered factor specs. Idempotent;
+    returns newly registered names. Registration is a SCREEN (and inversion
+    doubles the screened family): the forward race + Šidák-corrected gate,
+    which pays for the full family size, remain the only judges."""
+    from ..db import utc_now
+
+    new: list[str] = []
+    existing = set(discovered_fills())
+    for cause in ("WEAK", "SILENT", "CONFLICT"):     # CRISIS: never filled
+        pop = _abstained_ctx_rows(cause)
+        if len(pop) < SCREEN_MIN_N:
+            continue
+        for tpl in TEMPLATES:
+            reads = [(eval_template(tpl, ctx), lab) for ctx, lab in pop]
+            reads = [(v, lab) for v, lab in reads
+                     if v is not None and abs(v) >= 0.05]
+            if len(reads) < SCREEN_MIN_N:
+                continue
+            acc = sum((v > 0) == (lab > 0) for v, lab in reads) / len(reads)
+            for invert, a in ((False, acc), (True, 1.0 - acc)):
+                name = f"bs_{cause.lower()}_{tpl}" + ("_inv" if invert else "")
+                if name in existing or a < SCREEN_MIN_ACC:
+                    continue
+                with connect() as conn:
+                    conn.execute(
+                        "INSERT INTO model_state (key, value, updated_at) "
+                        "VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                        "value=excluded.value, updated_at=excluded.updated_at",
+                        (f"bs_fill:{name}",
+                         json.dumps({"cause": cause, "template": tpl,
+                                     "invert": invert,
+                                     "screen_n": len(reads),
+                                     "screen_acc": round(a, 3)}),
+                         utc_now()))
+                new.append(name)
+    return new
+
+
+def discovered_fills() -> dict[str, dict]:
+    """name → spec of every self-generated fill (from model_state)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM model_state WHERE key LIKE 'bs_fill:%'"
+        ).fetchall()
+    out = {}
+    for r in rows:
+        try:
+            out[r["key"].split(":", 1)[1]] = json.loads(r["value"])
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def eval_discovered(name: str, spec: dict, ctx: dict,
+                    cause_of=None) -> float | None:
+    """Live evaluator for a self-generated fill: fires only on its cause's
+    population, reads via its template. `cause_of` injectable for tests."""
+    from .factors import _session_cause
+
+    cause = (cause_of or _session_cause)(ctx)
+    if cause != spec.get("cause"):
+        return None
+    v = eval_template(spec.get("template", ""), ctx)
+    if v is None:
+        return None
+    return -v if spec.get("invert") else v
+
+
 def report() -> dict:
-    """The nightly EVOLVE artifact: cause map + fill-candidate forward records.
-    Everything the learning_log needs to show the blind-spot loop is alive."""
+    """The nightly EVOLVE artifact: cause map + fill-candidate forward records
+    + self-generated fills. Everything the learning_log needs to show the
+    blind-spot loop is alive AND generative."""
     d = diagnose()
     return {"n_abstained": d["n_abstained"], "causes": d["causes"],
-            "fill_records": fill_records()}
+            "fill_records": fill_records(),
+            "generated_fills": discovered_fills()}

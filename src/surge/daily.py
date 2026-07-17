@@ -145,9 +145,12 @@ def run_daily(write: bool = True) -> dict:
     # rate is measured from the always-committing shadow, and the conditional
     # fill variables racing to close each gap are tracked (duel/blindspot.py).
     def _blindspot() -> dict:
-        from .duel.blindspot import report as bs_report
+        from .duel.blindspot import generate_fills, report as bs_report
 
-        return bs_report()
+        newly = generate_fills()        # SELF-GENERATE: 재발 패턴 → 새 변인 등록
+        out = bs_report()
+        out["generated_new"] = newly
+        return out
     blindspot = _safe("blindspot", _blindspot, warnings) or {}
 
     # ── 2.7 RAPID VERIFY — cross-sectional pooled + prior-warmed e-value: the
