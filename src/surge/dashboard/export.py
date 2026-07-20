@@ -24,29 +24,24 @@ def _safe(fn, default):
         return default
 
 
-def _calls() -> dict:
-    """Latest session's call cards, joined with the adaptive shadow P(up) and
-    its conviction-bucket evidence (the same line the CLI card cites)."""
+def _session_cards(date: str, with_results: bool) -> list[dict]:
+    """Per-pair call cards for one session date. `with_results` also attaches
+    the realized outcome (correct / pnl / underlying open→close) so a completed
+    session can show colls-vs-what-happened."""
     from ..duel import calibration
     from ..duel.pairs import PAIRS
 
     with connect() as conn:
-        row = conn.execute(
-            "SELECT MAX(decision_date) d FROM duel_decisions").fetchone()
-        latest = row["d"] if row else None
-        if not latest:
-            return {"date": None, "cards": []}
         rows = conn.execute(
             "SELECT * FROM duel_decisions WHERE decision_date=? ORDER BY pair",
-            (latest,)).fetchall()
+            (date,)).fetchall()
         shadows = {r["pair"]: r["score"] for r in conn.execute(
             "SELECT pair, score FROM duel_variants "
-            "WHERE variant='adaptive' AND decision_date=?", (latest,))}
+            "WHERE variant='adaptive' AND decision_date=?", (date,))}
     cards = []
     for r in rows:
         pair = PAIRS.get(r["pair"], {})
-        p = None
-        ev = None
+        p = ev = None
         if r["pair"] in shadows and shadows[r["pair"]] is not None:
             p = (shadows[r["pair"]] + 1.0) / 2.0
             ev = _safe(lambda: calibration.lookup(r["pair"], p), None)
@@ -54,16 +49,57 @@ def _calls() -> dict:
             reasons = json.loads(r["reasons"]) if r["reasons"] else []
         except (ValueError, TypeError):
             reasons = []
-        cards.append({
+        card = {
             "pair": r["pair"], "name": pair.get("name", r["pair"]),
             "bull": pair.get("bull"), "bear": pair.get("bear"),
             "side": r["side"], "score": r["score"],
             "conviction": r["conviction"], "size_pct": r["size_factor"],
             "entry": r["entry_ref"], "stop": r["stop_price"],
             "target": r["target_price"], "model": r["model"],
+            "forced": bool(r["forced"]) if "forced" in r.keys() else False,
             "adaptive_p": p, "bucket_evidence": ev, "reasons": reasons,
-        })
-    return {"date": latest, "cards": cards}
+        }
+        if with_results:
+            card["correct"] = r["correct"]
+            card["pnl_pct"] = r["pnl_pct"]
+            card["oc_ret"] = r["soxx_oc_ret"]
+            card["exit_reason"] = r["exit_reason"]
+        cards.append(card)
+    return cards
+
+
+def _calls() -> dict:
+    """The UPCOMING session's calls (금일/오늘 밤 예측) — MAX(decision_date),
+    the newest call, typically generated pre-open and not yet scored."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT MAX(decision_date) d FROM duel_decisions").fetchone()
+    latest = row["d"] if row else None
+    if not latest:
+        return {"date": None, "cards": []}
+    return {"date": latest, "cards": _session_cards(latest, with_results=False)}
+
+
+def _previous_results() -> dict:
+    """The most recent SCORED session before the upcoming one (전날 콜+결과) —
+    each pair's call shown against what the market actually did."""
+    with connect() as conn:
+        latest = conn.execute(
+            "SELECT MAX(decision_date) d FROM duel_decisions").fetchone()["d"]
+        if not latest:
+            return {"date": None, "cards": []}
+        prev = conn.execute(
+            "SELECT MAX(decision_date) d FROM duel_decisions "
+            "WHERE decision_date < ? AND evaluated_at IS NOT NULL", (latest,)
+        ).fetchone()["d"]
+    if not prev:
+        return {"date": None, "cards": []}
+    cards = _session_cards(prev, with_results=True)
+    scored = [c for c in cards if c.get("correct") is not None]
+    wins = sum(1 for c in scored if c["correct"])
+    return {"date": prev, "cards": cards,
+            "n_scored": len(scored), "wins": wins,
+            "accuracy": (wins / len(scored)) if scored else None}
 
 
 def _tally() -> dict:
@@ -131,6 +167,7 @@ def collect() -> dict:
     return {
         "generated_at": utc_now(),
         "calls": _safe(_calls, {"date": None, "cards": []}),
+        "previous": _safe(_previous_results, {"date": None, "cards": []}),
         "tally": _safe(_tally, {}),
         "verify": _safe(_verify, {}),
         "calibration": _safe(_calibration, {}),
@@ -262,12 +299,13 @@ html+=`<h1>surge 야간 방향 콜<small>${esc(calls.date||'—')} 미국 세션
   ${famBadge}
 </div>`;
 
-// ── call cards ──────────────────────────────────────────────────────────────
-html+='<section><h2>오늘 밤 콜 카드</h2>';
+// ── 금일 예측 (다가오는 세션 — 장 시작 전 콜) ────────────────────────────────
+html+=`<section><h2>금일 예측 · ${esc(calls.date||'—')} 세션 (장 시작 전 콜)</h2>`;
 if(!cards.length) html+='<div class="klabel">아직 저장된 콜이 없습니다 — 야간 파이프라인 첫 실행 후 채워집니다.</div>';
 for(const c of cards){
   const dir=c.side==='STAND_ASIDE'?'hold':(c.side===c.bull?'bull':'bear');
   const label=c.side==='STAND_ASIDE'?'관망':(dir==='bull'?`${esc(c.side)} 상승`:`${esc(c.side)} 하락`);
+  const forced=c.forced?' <span class="pill hold" style="font-size:.72rem">필수매수 강제</span>':'';
   let ev='';
   if(c.adaptive_p!=null){
     ev=`<div class="evidence">적응 엔진 P(상승) <b>${pct(c.adaptive_p)}</b>`;
@@ -283,11 +321,37 @@ for(const c of cards){
     reasons=`<details><summary>근거 ${c.reasons.length}개</summary><ul>${c.reasons.map(r=>`<li>${esc(r)}</li>`).join('')}</ul></details>`;
   html+=`<div class="card">
     <div class="pairline"><span class="pairname">${esc(c.name)}</span>
-      <span class="pill ${dir}">${label}</span></div>
+      <span class="pill ${dir}">${label}</span>${forced}</div>
     <div class="nums">score ${num(c.score,3)} · 확신 ${num(c.conviction,3)} · 모델 ${esc(c.model||'champion')}</div>
     <div class="nums">${brackets}</div>${ev}${reasons}</div>`;
 }
 html+='</section>';
+
+// ── 직전 세션 콜 + 실제 결과 ─────────────────────────────────────────────────
+const prev=D.previous||{};
+if(prev.date){
+  const pacc=prev.accuracy!=null?` · 적중 ${pct(prev.accuracy)} (${prev.wins}/${prev.n_scored})`:'';
+  html+=`<section><h2>직전 세션 결과 · ${esc(prev.date)}${pacc}</h2>`;
+  for(const c of (prev.cards||[])){
+    const dir=c.side==='STAND_ASIDE'?'hold':(c.side===c.bull?'bull':'bear');
+    const label=c.side==='STAND_ASIDE'?'관망':(dir==='bull'?`${esc(c.side)} 상승`:`${esc(c.side)} 하락`);
+    let res='';
+    if(c.side==='STAND_ASIDE'){
+      res=c.oc_ret!=null?`<span class="klabel">관망 (기초 ${pct(c.oc_ret,2)})</span>`:'<span class="klabel">관망</span>';
+    }else if(c.correct!=null){
+      const ok=c.correct===1;
+      const pnl=c.pnl_pct!=null?` · pnl ${pct(c.pnl_pct,2)}`:'';
+      res=`<span class="pill ${ok?'bull':'bear'}">${ok?'✅ 적중':'❌ 빗나감'}</span><span class="klabel">${pnl}${c.exit_reason?' · '+esc(c.exit_reason):''}</span>`;
+    }else{
+      res='<span class="klabel">채점 대기</span>';
+    }
+    html+=`<div class="card">
+      <div class="pairline"><span class="pairname">${esc(c.name)}</span>
+        <span class="pill ${dir}">${label}</span></div>
+      <div class="nums">${res}</div></div>`;
+  }
+  html+='</section>';
+}
 
 // ── cumulative record ───────────────────────────────────────────────────────
 const t=D.tally||{}, tp=t.pairs||{};

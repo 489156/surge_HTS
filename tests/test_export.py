@@ -43,11 +43,49 @@ def test_export_site_writes_files(tmp_path, monkeypatch):
 
     html = (tmp_path / "site" / "index.html").read_text("utf-8")
     assert "window.DATA" in html and "SOXL" in html
+    assert "금일 예측" in html                      # upcoming-session heading
     assert "투자자문 아님" in html                 # disclaimer always present
     assert "</script>" in html
     # embedded JSON must not terminate the script tag early
     payload = html.split("window.DATA = ", 1)[1]
     assert "</" not in payload.split("\n", 1)[0].replace("<\\/", "")
+
+
+def test_previous_results_shows_prior_scored_session(tmp_path, monkeypatch):
+    db = tmp_path / "p.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    with connect(db) as conn:
+        # a SCORED prior session (07-08) + an UNSCORED upcoming call (07-09)
+        db_upsert(conn, "duel_decisions", [
+            {"pair": "soxl_soxs", "decision_date": "2026-07-08", "side": "SOXL",
+             "score": 0.4, "conviction": 0.4, "size_factor": 1.0,
+             "correct": 1, "pnl_pct": 0.052, "soxx_oc_ret": 0.011,
+             "exit_reason": "target", "model": "champion",
+             "evaluated_at": "y", "captured_at": "x"},
+            {"pair": "tqqq_sqqq", "decision_date": "2026-07-08", "side": "SQQQ",
+             "score": -0.3, "conviction": 0.3, "size_factor": 0.5,
+             "correct": 0, "pnl_pct": -0.021, "soxx_oc_ret": 0.008,
+             "exit_reason": "stop", "model": "champion",
+             "evaluated_at": "y", "captured_at": "x"},
+            {"pair": "soxl_soxs", "decision_date": "2026-07-09", "side": "SOXS",
+             "score": -0.5, "conviction": 0.5, "size_factor": 1.0,
+             "model": "champion", "captured_at": "x"},   # upcoming, unscored
+        ], immutable=("captured_at",))
+
+    data = export.collect()
+    assert data["calls"]["date"] == "2026-07-09"          # upcoming = MAX date
+    assert data["calls"]["cards"][0]["side"] == "SOXS"
+    prev = data["previous"]
+    assert prev["date"] == "2026-07-08"                   # prior SCORED session
+    assert prev["n_scored"] == 2 and prev["wins"] == 1
+    assert prev["accuracy"] == 0.5
+    got = {c["pair"]: c["correct"] for c in prev["cards"]}
+    assert got == {"soxl_soxs": 1, "tqqq_sqqq": 0}
+    assert prev["cards"][0]["pnl_pct"] is not None
+
+    html = export.render_html(data)
+    assert "직전 세션 결과" in html and "적중" in html
 
 
 def test_export_empty_db_is_degrade_safe(tmp_path, monkeypatch):
