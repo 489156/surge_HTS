@@ -140,6 +140,19 @@ def run_daily(write: bool = True) -> dict:
         return out
     variables = _safe("variables", _variables, warnings) or {}
 
+    # ── 2.6 BLIND-SPOT loop — 관망은 진단의 시작점: abstained sessions are
+    # classified by cause (신호침묵/충돌/미약/위기), each cause's would-have hit
+    # rate is measured from the always-committing shadow, and the conditional
+    # fill variables racing to close each gap are tracked (duel/blindspot.py).
+    def _blindspot() -> dict:
+        from .duel.blindspot import generate_fills, report as bs_report
+
+        newly = generate_fills()        # SELF-GENERATE: 재발 패턴 → 새 변인 등록
+        out = bs_report()
+        out["generated_new"] = newly
+        return out
+    blindspot = _safe("blindspot", _blindspot, warnings) or {}
+
     # ── 2.7 RAPID VERIFY — cross-sectional pooled + prior-warmed e-value: the
     # family (engine) verdict a new pair inherits, cutting per-pair years to
     # family months (see duel/verify.py). Surfaced, not a live-flip gate. ──
@@ -196,6 +209,7 @@ def run_daily(write: bool = True) -> dict:
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed
         "verify": verify_status,          # 빠른 확신 검증 (교차풀링 + 프라이어워밍)
+        "blindspot": blindspot,           # 관망 원인 진단 + 사각지대 fill 레이스
         "variables": variables,           # 변인 추정 드리프트 (adaptive weight trace)
         "cadence": cadence,               # freshness of duel/rotation/surge inputs
         "stale_inputs": stale_inputs,     # which (if any) appear to have a stalled schedule

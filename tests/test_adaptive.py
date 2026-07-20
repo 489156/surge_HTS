@@ -453,6 +453,60 @@ def test_intraday_candidate_factors_fire():
     assert CANDIDATE_FACTORS["intraday_mom"]({"und_vol20": 0.02}) is None
 
 
+# ── analyst-desk (stacked) engine — 게시물 착안 연구 (2026-07-11) ─────────────
+def test_stacked_learns_planted_signal_oos():
+    rng = np.random.default_rng(3)
+    n = 400
+    X = rng.normal(size=(n, len(adaptive.FEATURES))).clip(-1, 1).tolist()
+    labels = [0.01 * x[2] for x in X]              # momentum_5d desk carries it
+    probs = adaptive.stacked_walk_forward_probs(X, labels, min_train=60)
+    scored = [(p, lab) for p, lab in zip(probs, labels, strict=True)
+              if p is not None]
+    assert len(scored) > 100
+    assert np.mean([(p > 0.5) == (lab > 0) for p, lab in scored]) > 0.9
+
+
+def test_stacked_is_out_of_sample_on_noise():
+    rng = np.random.default_rng(11)
+    n = 400
+    X = rng.normal(size=(n, len(adaptive.FEATURES))).clip(-1, 1).tolist()
+    labels = rng.normal(size=n).tolist()
+    probs = adaptive.stacked_walk_forward_probs(X, labels, min_train=60)
+    scored = [(p, lab) for p, lab in zip(probs, labels, strict=True)
+              if p is not None]
+    acc = np.mean([(p > 0.5) == (lab > 0) for p, lab in scored])
+    assert 0.38 <= acc <= 0.62                      # chance, not memorized
+
+
+def test_predict_config_placeholder_label_never_read():
+    rng = np.random.default_rng(5)
+    n = 260
+    X = rng.normal(size=(n, len(adaptive.FEATURES))).clip(-1, 1).tolist()
+    labels = [0.01 * x[0] for x in X]
+    tonight = [0.5] * len(adaptive.FEATURES)
+    # the appended placeholder label must not influence tonight's emission —
+    # probs_for_config appends 0.0; recompute manually with a huge fake label
+    p0 = adaptive.predict_config(X, labels, tonight, "adaptive_debate")
+    p1 = adaptive.stacked_walk_forward_probs(
+        [*X, tonight], [*labels, 999.0],
+        min_train=adaptive.resolve_config("adaptive_debate")["min_train"])[-1]
+    if p0 is None:                                   # short history → both silent
+        assert p1 is None
+    else:
+        assert p1 == pytest.approx(p0)
+    # flat path dispatches too
+    pf = adaptive.predict_config(X, labels, tonight, "adaptive")
+    assert pf is None or 0.0 < pf < 1.0
+
+
+def test_fit_config_returns_none_for_stacked():
+    assert adaptive.fit_config([[0.0] * len(adaptive.FEATURES)] * 200,
+                               [0.01] * 200, "adaptive_debate") is None
+    assert set(adaptive.DESKS)  # desks defined
+    covered = {f for feats in adaptive.DESKS.values() for f in feats}
+    assert covered == set(adaptive.FEATURES)         # every variable has a desk
+
+
 def test_daily_report_includes_variables(tmp_path, monkeypatch):
     db = tmp_path / "d.db"
     init_db(db)

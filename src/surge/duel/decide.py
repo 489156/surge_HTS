@@ -8,6 +8,7 @@ the EV-correct trade is no trade.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ..config import settings
@@ -38,6 +39,8 @@ class DuelDecision:
     # time for the card's conviction-with-evidence line; not persisted — the
     # shadow variant row carries it into the forward ledger).
     shadow_prob: float | None = None
+    rvol_damped: bool = False   # size capped by underlying realized vol
+    forced: bool = False        # mandatory-pick override (would have abstained)
 
     @property
     def reasons(self) -> list[str]:
@@ -46,6 +49,11 @@ class DuelDecision:
         if self.gap_guard is not None and self.side != "STAND_ASIDE":
             out.append(f"갭 가드: 시가 갭이 콜 방향으로 {self.gap_guard*100:+.2f}%"
                        " 이상이면 진입 취소(선반영)")
+        if self.rvol_damped:
+            out.append("변동성 감쇠: 기초 실현변동성 높음 → 사이즈 절반으로 제한")
+        if self.forced:
+            out.append("필수매수 제약: 오늘 밤 최고확신 종목으로 강제 선정"
+                       " (관망이 +EV였음 — 별도 채점)")
         if self.model != "champion":
             out.append(f"모델: {self.model}")
         if self.abstain_reason:
@@ -59,6 +67,29 @@ def _size_factor(conviction: float) -> float:
     if conviction >= settings.duel_abstain_threshold:
         return 0.5
     return 0.0
+
+
+def _rvol_cap(ctx: dict) -> float:
+    """Max size factor allowed by the underlying's realized volatility (a risk
+    layer independent of the VIX crisis abstain). 1.0 = no cap; 0.5 when the
+    annualized σ20 is at/above the dampen threshold."""
+    thr = settings.duel_rvol_dampen_annual
+    vol = ctx.get("und_vol20")
+    if thr <= 0 or not vol:
+        return 1.0
+    annual = float(vol) * math.sqrt(252)
+    return 0.5 if annual >= thr else 1.0
+
+
+def _brackets(ctx: dict, side: str,
+              entry_ref: dict[str, float] | None) -> tuple:
+    atr = (ctx.get("atr_pct") or {}).get(side)
+    ref = (entry_ref or {}).get(side)
+    stop = target = None
+    if ref and atr:
+        stop = round(ref * (1 - settings.duel_stop_atr * atr), 4)
+        target = round(ref * (1 + settings.duel_target_atr * atr), 4)
+    return ref, stop, target, atr
 
 
 def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
@@ -83,26 +114,28 @@ def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
 
     sf = _size_factor(conviction)
     if sf == 0.0:
+        # entry_ref/atr are populated even on abstain so a session-level
+        # mandatory pick can promote this to a directional call without refetch
+        aside_side = pair["bull"] if score > 0 else pair["bear"]
+        ref, stop, target, atr = _brackets(ctx, aside_side, entry_ref)
         return DuelDecision(date=date, pair_id=pid, side="STAND_ASIDE", score=score,
                             conviction=conviction, size_factor=0.0, size_pct=0.0,
-                            components=comps,
+                            entry_ref=ref, stop_price=stop, target_price=target,
+                            atr_pct=atr, components=comps,
                             abstain_reason=f"확신도 {conviction:.2f} < "
                                            f"{settings.duel_abstain_threshold:g}"
                                            " (신호 불충분 — 관망이 +EV)")
 
+    cap = _rvol_cap(ctx)
+    sf = min(sf, cap)
     side = pair["bull"] if score > 0 else pair["bear"]
-    atr = (ctx.get("atr_pct") or {}).get(side)
-    ref = (entry_ref or {}).get(side)
-    stop = target = None
-    if ref and atr:
-        stop = round(ref * (1 - settings.duel_stop_atr * atr), 4)
-        target = round(ref * (1 + settings.duel_target_atr * atr), 4)
+    ref, stop, target, atr = _brackets(ctx, side, entry_ref)
 
     return DuelDecision(
         date=date, pair_id=pid, side=side, score=score, conviction=conviction,
         size_factor=sf, size_pct=round(settings.duel_size_pct * sf, 4),
         entry_ref=ref, stop_price=stop, target_price=target, atr_pct=atr,
-        components=comps, gap_guard=_gap_guard(ctx),
+        components=comps, gap_guard=_gap_guard(ctx), rvol_damped=cap < 1.0,
     )
 
 
@@ -149,26 +182,55 @@ def decide_adaptive(ctx: dict, prob_up: float,
                                            " (위기 변동성 — 3배 레버리지 베팅 금지)")
 
     if conviction < settings.duel_adaptive_band:
+        aside_side = pair["bull"] if score > 0 else pair["bear"]
+        ref, stop, target, atr = _brackets(ctx, aside_side, entry_ref)
         return DuelDecision(date=date, pair_id=pid, side="STAND_ASIDE",
                             score=score, conviction=conviction, size_factor=0.0,
-                            size_pct=0.0, components=comps, model="adaptive",
+                            size_pct=0.0, entry_ref=ref, stop_price=stop,
+                            target_price=target, atr_pct=atr, components=comps,
+                            model="adaptive",
                             abstain_reason=f"P(상승) {prob_up:.1%} — 엣지 "
                                            f"|2p−1| {conviction:.2f} < "
                                            f"{settings.duel_adaptive_band:g}"
                                            " (관망이 +EV)")
-    sf = 1.0 if conviction >= settings.duel_adaptive_full else 0.5
+    cap = _rvol_cap(ctx)
+    sf = min(1.0 if conviction >= settings.duel_adaptive_full else 0.5, cap)
 
     side = pair["bull"] if score > 0 else pair["bear"]
-    atr = (ctx.get("atr_pct") or {}).get(side)
-    ref = (entry_ref or {}).get(side)
-    stop = target = None
-    if ref and atr:
-        stop = round(ref * (1 - settings.duel_stop_atr * atr), 4)
-        target = round(ref * (1 + settings.duel_target_atr * atr), 4)
+    ref, stop, target, atr = _brackets(ctx, side, entry_ref)
 
     return DuelDecision(
         date=date, pair_id=pid, side=side, score=score, conviction=conviction,
         size_factor=sf, size_pct=round(settings.duel_size_pct * sf, 4),
         entry_ref=ref, stop_price=stop, target_price=target, atr_pct=atr,
         components=comps, gap_guard=_gap_guard(ctx), model="adaptive",
+        rvol_damped=cap < 1.0,
+    )
+
+
+def promote_forced(d: DuelDecision, pair: dict) -> DuelDecision:
+    """Mandatory-pick override: turn an abstained decision into a directional
+    half-size call. Direction = sign of the (still-computed) vote score; size
+    is half, further capped by the realized-vol dampener; brackets reuse the
+    entry_ref/atr the abstain already carried. Flagged `forced` so the ledger
+    scores it apart from genuine (unforced) calls — the constraint's cost is
+    measured, not hidden. A CRISIS abstain is NOT promoted (safety wins over
+    the mandate: 3x in a VIX>crisis panic stays no-trade)."""
+    if d.abstain_reason and "위기 변동성" in d.abstain_reason:
+        return d
+    side = pair["bull"] if d.score >= 0 else pair["bear"]
+    sf = 0.5                 # forced picks are half size (the constraint is a
+    #                          bet you didn't want — never full leverage)
+    stop = target = None
+    if d.entry_ref and d.atr_pct:
+        stop = round(d.entry_ref * (1 - settings.duel_stop_atr * d.atr_pct), 4)
+        target = round(d.entry_ref * (1 + settings.duel_target_atr * d.atr_pct), 4)
+    return DuelDecision(
+        date=d.date, pair_id=d.pair_id, side=side, score=d.score,
+        conviction=d.conviction, size_factor=sf,
+        size_pct=round(settings.duel_size_pct * sf, 4),
+        entry_ref=d.entry_ref, stop_price=stop, target_price=target,
+        atr_pct=d.atr_pct, components=d.components, model=d.model,
+        gap_guard=d.gap_guard, rvol_damped=d.rvol_damped, forced=True,
+        shadow_prob=d.shadow_prob,
     )

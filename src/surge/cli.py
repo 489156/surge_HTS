@@ -390,6 +390,7 @@ def _cmd_duel(args) -> int:
         return 1
     # macro/Asia frames are identical across pairs — fetch once
     shared = duel_data.fetch_shared("6mo") if len(pair_ids) > 1 else None
+    decided: list[tuple] = []
     for pid in pair_ids:
         pair = get_pair(pid)
         try:
@@ -398,7 +399,16 @@ def _cmd_duel(args) -> int:
         except Exception as exc:  # noqa: BLE001 — one pair must not kill the rest
             print(f"\n  {pair['name']}: 데이터 부족/오류 — {exc}")
             continue
+        decided.append((pair, d))
         _print_duel_card(d, pair)
+
+    # Mandatory pick: never abstain on ALL pairs — commit the top-conviction one
+    forced = duel_live.apply_mandatory_pick(decided)
+    if forced is not None:
+        pair, d = forced
+        print("\n  ── 필수매수 제약 발동 — 전 페어 관망이라 최고확신 종목 강제 선정 ──")
+        _print_duel_card(d, pair)
+
     print("\n  ※ 투자자문 아님 · 수익 보장 없음 · 3배 레버리지 상품 · 콜은 저장되며"
           " `surge duel-eval`로 사후 채점됩니다.\n")
     return 0
@@ -841,6 +851,61 @@ def _cmd_adaptive(args) -> int:
         print("\n  설정 레이스 전진 기록 없음 — `surge duel` 야간 실행 + 익일"
               " `surge duel-eval`이 쌓아갑니다."
               " 과거 근거는 `surge adaptive --replay --offline`으로 확인.")
+    print()
+    return 0
+
+
+def _cmd_blindspot(_args) -> int:
+    """관망을 진단의 시작점으로: 원인별 관망 수 · 그날 섀도가 커밋했다면 맞았을
+    확률(would-have) · 그 사각지대를 메우러 레이스 중인 조건부 변인의 전진 성적."""
+    from .duel.blindspot import FILLS, report
+
+    r = report()
+    print(f"\n  관망 원인 진단 — 라벨 있는 관망 세션 {r['n_abstained']}건")
+    print(f"  {'원인':<10} {'건수':>4} {'would-have':>11} {'상승비율':>8}  fill 변인")
+    label = {"WEAK": "신호미약", "CONFLICT": "신호충돌",
+             "SILENT": "신호침묵", "CRISIS": "위기가드"}
+    for tag in ("WEAK", "CONFLICT", "SILENT", "CRISIS"):
+        b = r["causes"].get(tag)
+        if not b:
+            continue
+        wa = f"{b['would_acc']*100:.0f}%" if b["would_acc"] is not None else "—"
+        up = f"{b['up_rate']*100:.0f}%" if b["up_rate"] is not None else "—"
+        fills = ", ".join(FILLS.get(tag, ())) or "(의도적 없음)"
+        print(f"  {label[tag]:<10} {b['n']:>4} {wa:>11} {up:>8}  {fills}")
+    fr = r["fill_records"]
+    if fr:
+        print("\n  fill 변인 전진 성적 (팩터 레이스):")
+        for name, s in fr.items():
+            acc = f"{s['acc']*100:.0f}%" if s["acc"] is not None else "—"
+            print(f"   · {name:<24} n={s['n']:>4}  적중 {acc}")
+    else:
+        print("\n  fill 변인 전진 기록 없음 — 다음 야간 콜부터 자기 사각지대"
+              " 세션에서만 기록·채점됩니다.")
+    print("\n  ※ 승격 경로: fill이 기존 팩터 게이트(Šidák z)를 넘으면 변인 편입"
+          " 제안 → 피처 벡터 → 설정 레이스 → BASE (전 단계 증거 기반).\n")
+    return 0
+
+
+def _cmd_forced_eval(_args) -> int:
+    """필수매수 제약이 얼마나 비싼가: 강제 선정 콜의 적중률·평균 pnl을 일반
+    (자발적) 콜과 나란히 — 관망이 +EV였던 밤에 강제한 베팅의 실제 비용."""
+    from .duel import live as duel_live
+
+    t = duel_live.forced_tally()
+    print("\n  필수매수 제약 비용 검토")
+    fa = f"{t['forced_acc']*100:.1f}%" if t["forced_acc"] is not None else "—"
+    ua = f"{t['unforced_acc']*100:.1f}%" if t["unforced_acc"] is not None else "—"
+    ap = f"{t['forced_avg_pnl']*100:+.2f}%" if t["forced_avg_pnl"] is not None else "—"
+    print(f"   강제 선정 콜: n={t['forced_n']:>3} 적중 {fa} 평균pnl {ap}")
+    print(f"   일반(자발) 콜: n={t['unforced_n']:>3} 적중 {ua}")
+    if t["forced_n"] and t["unforced_acc"] is not None and t["forced_acc"] is not None:
+        gap = (t["forced_acc"] - t["unforced_acc"]) * 100
+        verdict = ("제약이 오히려 도움" if gap > 2 else
+                   "제약 비용 큼(관망이 옳았음)" if gap < -2 else "중립")
+        print(f"   → 적중률 격차 {gap:+.1f}%p — {verdict}")
+    else:
+        print("   → 아직 강제 선정 표본이 부족합니다 (전 페어 관망한 밤에만 발생).")
     print()
     return 0
 
@@ -1309,6 +1374,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("verify", help="빠른 확신 검증 (교차풀링·프라이어워밍 e-value)"
                    ).set_defaults(func=_cmd_verify)
+
+    sub.add_parser("blindspot",
+                   help="관망 원인 진단 + 사각지대 fill 변인 레이스 현황"
+                   ).set_defaults(func=_cmd_blindspot)
+
+    sub.add_parser("forced-eval",
+                   help="필수매수 제약 비용 — 강제 선정 콜 vs 일반 콜 성적"
+                   ).set_defaults(func=_cmd_forced_eval)
 
     sp = sub.add_parser("pages-export",
                         help="정적 사이트 내보내기 (GitHub Pages/모바일 열람)")

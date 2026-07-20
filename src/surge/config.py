@@ -119,6 +119,19 @@ class Settings(BaseSettings):
     duel_target_atr: float = 1.5           # target = entry + k·ATR14 (R:R 1.5)
     duel_size_pct: float = 0.10            # max notional fraction per night (3x ETF)
     duel_slippage_bps: float = 2.0         # SOXL/SOXS are ultra-liquid (≈1c spread)
+    # Realized-volatility sizing dampener — SEPARATE from the VIX crisis abstain.
+    # The kill-switch only sees index VIX; but a 3x product can be violently
+    # volatile at the SECTOR level while VIX is calm (SOXX ran 68% annualized in
+    # 2026-07 with VIX ~16). When the underlying's own realized vol (annualized
+    # σ20) is at/above this, cap size at half — a bet is fine, full leverage on
+    # a 3x product amid 50%+ realized vol is not. 0 disables.
+    duel_rvol_dampen_annual: float = 0.50
+    # Mandatory pick — never abstain on ALL pairs; commit the single highest-
+    # conviction call each night (half size, gap-guard/crisis still respected).
+    # This OVERRIDES the "abstain is +EV" default by user policy, so every
+    # forced pick is flagged and scored SEPARATELY to measure the constraint's
+    # cost (surge forced-eval / the ledger's forced column).
+    duel_mandatory_pick: bool = True
     # Gap guard — committed cancel-at-open condition: if the underlying's open
     # gap is already ≥ z·σ20 IN the call's direction, do not enter (선반영 가설).
     # DEFAULT OFF (0): the full-archive replay REJECTED the hypothesis — trades

@@ -72,12 +72,9 @@ def replay_calibration(pair_id: str = "soxl_soxs", offline: bool = True,
     days = bt._collect_days(prep, pair)
     if len(days) < 200:
         return {"error": f"only {len(days)} usable sessions"}
-    cfg = adaptive.resolve_config(config)
     labels = [d["label"] for d in days]
-    probs, raw = adaptive.walk_forward_probs(
-        bt._feature_matrix(days), labels,
-        ridge_lambda=cfg["ridge_lambda"], min_train=cfg["min_train"],
-        window=cfg["window"], features=cfg["features"], with_raw=True)
+    probs, raw = adaptive.probs_for_config(
+        bt._feature_matrix(days), labels, config, with_raw=True)
     buckets = _tally(probs, labels)          # post-anchoring (what cards cite)
     raw_buckets = _tally(raw, labels)        # raw map (the live recalibrator)
     if persist:

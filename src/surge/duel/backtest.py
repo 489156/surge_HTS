@@ -109,11 +109,8 @@ def run(period: str = "2y", frames: dict | None = None,
     if mode == "adaptive":
         from . import adaptive
 
-        cfg = adaptive.resolve_config(adaptive_config)
-        probs = adaptive.walk_forward_probs(
-            _feature_matrix(days), [d["label"] for d in days],
-            ridge_lambda=cfg["ridge_lambda"], min_train=cfg["min_train"],
-            window=cfg["window"], features=cfg["features"])
+        probs = adaptive.probs_for_config(
+            _feature_matrix(days), [d["label"] for d in days], adaptive_config)
 
     slip = settings.duel_slippage_bps
     equity = settings.starting_capital
@@ -270,11 +267,7 @@ def race(period: str = "2y", pair_id: str = "soxl_soxs",
     out: dict = {"pair": pair_id, "n_sessions": len(days),
                  "baseline_always": baseline, "configs": {}}
     for name in adaptive.CONFIGS:
-        cfg = adaptive.resolve_config(name)
-        probs = adaptive.walk_forward_probs(
-            X, labels, ridge_lambda=cfg["ridge_lambda"],
-            min_train=cfg["min_train"], window=cfg["window"],
-            features=cfg["features"])
+        probs = adaptive.probs_for_config(X, labels, name)
         scored = [(p, lab) for p, lab in zip(probs, labels, strict=True)
                   if p is not None]
         n = len(scored)
