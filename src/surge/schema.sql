@@ -302,6 +302,7 @@ CREATE TABLE IF NOT EXISTS duel_decisions (
     components    TEXT,                  -- structured [{name,value,weight}] JSON
     gap_guard     REAL,                  -- cancel-entry gap threshold (return units)
     model         TEXT DEFAULT 'champion', -- engine that produced the call
+    forced        INTEGER DEFAULT 0,       -- mandatory-pick override (would have abstained)
     -- realized outcome (filled by duel-eval after the session)
     entry_fill    REAL,
     exit_fill     REAL,

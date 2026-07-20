@@ -221,6 +221,35 @@ def _persist_ctx(pair: dict, ctx: dict) -> None:
         }], immutable=("captured_at",))
 
 
+def apply_mandatory_pick(decided: list[tuple]) -> tuple | None:
+    """Session-level constraint (settings.duel_mandatory_pick): if EVERY pair
+    abstained, promote the single highest-conviction one to a forced
+    directional call, re-persist it, and return (pair, forced_decision) so the
+    caller can surface it. Returns None when no promotion happened (disabled,
+    empty, a non-crisis directional call already exists, or only crisis
+    abstains remain). The forced row is flagged so it is scored apart from
+    genuine calls — the constraint's cost stays measurable."""
+    from .decide import promote_forced
+
+    if not settings.duel_mandatory_pick or not decided:
+        return None
+    if any(d.side != "STAND_ASIDE" for _p, d in decided):
+        return None                      # a real directional call already stands
+    # eligible = abstains that are NOT the crisis kill-switch (safety wins)
+    eligible = [(p, d) for p, d in decided
+                if not (d.abstain_reason and "위기 변동성" in d.abstain_reason)]
+    if not eligible:
+        return None
+    pair, d = max(eligible, key=lambda pd: pd[1].conviction)
+    forced = promote_forced(d, pair)
+    if not forced.forced:                # promotion declined (crisis)
+        return None
+    _persist(forced)
+    logger.info("mandatory pick forced: {} {} (conviction {:.2f})",
+                forced.date, forced.side, forced.conviction)
+    return (pair, forced)
+
+
 def _persist(d: DuelDecision) -> None:
     row = {
         "pair": d.pair_id,
@@ -234,6 +263,7 @@ def _persist(d: DuelDecision) -> None:
         "target_price": d.target_price,
         "gap_guard": d.gap_guard,
         "model": d.model,
+        "forced": 1 if d.forced else 0,
         "reasons": json.dumps(d.reasons, ensure_ascii=False),
         "components": json.dumps(
             [{"name": c.name, "value": c.value, "weight": c.weight}
@@ -363,6 +393,34 @@ def eval_outcomes(frames: dict | None = None) -> dict:
     from . import factors
     factors.score_pending(_label)        # score shadow candidate factors forward
     return _tally()
+
+
+def forced_tally() -> dict:
+    """Cost of the mandatory-pick constraint: forced picks scored apart from
+    genuine calls, plus what those SAME sessions' underlyings actually did (so
+    'a forced bet vs the abstain it replaced' is measurable, not asserted)."""
+    with connect() as conn:
+        f = conn.execute(
+            "SELECT COUNT(*) n, "
+            "SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) wins, "
+            "AVG(pnl_pct) avg_pnl FROM duel_decisions "
+            "WHERE forced=1 AND evaluated_at IS NOT NULL AND correct IS NOT NULL"
+        ).fetchone()
+        g = conn.execute(
+            "SELECT COUNT(*) n, "
+            "SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) wins "
+            "FROM duel_decisions WHERE (forced=0 OR forced IS NULL) "
+            "AND side != 'STAND_ASIDE' AND evaluated_at IS NOT NULL "
+            "AND correct IS NOT NULL").fetchone()
+    fn = f["n"] or 0
+    gn = g["n"] or 0
+    return {
+        "forced_n": fn, "forced_wins": f["wins"] or 0,
+        "forced_acc": (f["wins"] or 0) / fn if fn else None,
+        "forced_avg_pnl": f["avg_pnl"],
+        "unforced_n": gn, "unforced_wins": g["wins"] or 0,
+        "unforced_acc": (g["wins"] or 0) / gn if gn else None,
+    }
 
 
 def _tally() -> dict:
