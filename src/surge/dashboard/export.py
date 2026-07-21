@@ -24,6 +24,53 @@ def _safe(fn, default):
         return default
 
 
+_COMP_KR = {
+    "asia_lead": "아시아 선행", "trend": "추세", "momentum_5d": "모멘텀",
+    "vix_regime": "변동성", "rates": "금리", "mean_reversion": "평균회귀",
+    "futures": "선물",
+}
+
+
+def _attribution(components: list[dict], oc_ret: float | None,
+                 side: str, bull: str) -> dict | None:
+    """Post-hoc hit/miss REASON: compare each stored signal's directional vote
+    against what the underlying actually did (open→close). value>0 = the signal
+    pointed UP (toward the bull leg); realized_up = oc_ret>0. A signal was RIGHT
+    when its direction matched the realized move. Leak-free — uses only the
+    frozen components and the realized label."""
+    if oc_ret is None or not components:
+        return None
+    realized_up = oc_ret > 0
+    call_up = side == bull
+    correct = call_up == realized_up
+    ranked = sorted(components, key=lambda c: -abs(
+        float(c.get("value") or 0) * float(c.get("weight") or 0)))
+    right, wrong = [], []
+    for c in ranked:
+        v = float(c.get("value") or 0)
+        if abs(v) < 0.05:                       # silent signal — no opinion
+            continue
+        label = _COMP_KR.get(c["name"], c["name"])
+        (right if (v > 0) == realized_up else wrong).append(label)
+    dom = next((c for c in ranked if abs(float(c.get("value") or 0)) >= 0.05),
+               None)
+    dom_label = _COMP_KR.get(dom["name"], dom["name"]) if dom else None
+    dom_right = ((float(dom["value"]) > 0) == realized_up) if dom else None
+    rdir = "상승" if realized_up else "하락"
+    cdir = "상승" if call_up else "하락"
+    pct_s = f"{oc_ret*100:+.2f}%"
+    if correct:
+        verdict = (f"적중 — {dom_label} 신호가 {rdir} 방향을 맞힘"
+                   if dom_right else f"적중 — 다수 신호가 {rdir} 일치")
+        verdict += f" (기초 {pct_s})"
+    else:
+        lead = f"{dom_label} 등 " if dom_label else ""
+        verdict = (f"빗나감 — {lead}신호는 {cdir} 예측했으나 "
+                   f"기초가 {rdir} 반전 ({pct_s})")
+    return {"verdict": verdict, "realized_pct": oc_ret,
+            "right": right[:4], "wrong": wrong[:4]}
+
+
 def _session_cards(date: str, with_results: bool) -> list[dict]:
     """Per-pair call cards for one session date. `with_results` also attaches
     the realized outcome (correct / pnl / underlying open→close) so a completed
@@ -64,6 +111,14 @@ def _session_cards(date: str, with_results: bool) -> list[dict]:
             card["pnl_pct"] = r["pnl_pct"]
             card["oc_ret"] = r["soxx_oc_ret"]
             card["exit_reason"] = r["exit_reason"]
+            try:
+                comps = json.loads(r["components"]) if r["components"] else []
+            except (ValueError, TypeError):
+                comps = []
+            card["analysis"] = _safe(
+                lambda: _attribution(comps, r["soxx_oc_ret"], r["side"],
+                                     pair.get("bull")), None) \
+                if r["side"] != "STAND_ASIDE" else None
         cards.append(card)
     return cards
 
@@ -335,20 +390,27 @@ if(prev.date){
   for(const c of (prev.cards||[])){
     const dir=c.side==='STAND_ASIDE'?'hold':(c.side===c.bull?'bull':'bear');
     const label=c.side==='STAND_ASIDE'?'관망':(dir==='bull'?`${esc(c.side)} 상승`:`${esc(c.side)} 하락`);
-    let res='';
+    let res='', analysis='';
     if(c.side==='STAND_ASIDE'){
       res=c.oc_ret!=null?`<span class="klabel">관망 (기초 ${pct(c.oc_ret,2)})</span>`:'<span class="klabel">관망</span>';
     }else if(c.correct!=null){
       const ok=c.correct===1;
       const pnl=c.pnl_pct!=null?` · pnl ${pct(c.pnl_pct,2)}`:'';
       res=`<span class="pill ${ok?'bull':'bear'}">${ok?'✅ 적중':'❌ 빗나감'}</span><span class="klabel">${pnl}${c.exit_reason?' · '+esc(c.exit_reason):''}</span>`;
+      const a=c.analysis;
+      if(a){
+        const rt=a.right&&a.right.length?`<span style="color:var(--bull)">맞은 신호: ${a.right.map(esc).join(', ')}</span>`:'';
+        const wr=a.wrong&&a.wrong.length?`<span style="color:var(--bear)">틀린 신호: ${a.wrong.map(esc).join(', ')}</span>`:'';
+        analysis=`<div class="evidence"><b>왜 ${ok?'맞았나':'틀렸나'}</b> — ${esc(a.verdict)}</div>`+
+                 (rt||wr?`<div class="nums">${[rt,wr].filter(Boolean).join(' · ')}</div>`:'');
+      }
     }else{
       res='<span class="klabel">채점 대기</span>';
     }
     html+=`<div class="card">
       <div class="pairline"><span class="pairname">${esc(c.name)}</span>
         <span class="pill ${dir}">${label}</span></div>
-      <div class="nums">${res}</div></div>`;
+      <div class="nums">${res}</div>${analysis}</div>`;
   }
   html+='</section>';
 }
