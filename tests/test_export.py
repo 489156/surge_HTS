@@ -167,6 +167,57 @@ def test_options_both_paths_dead_returns_none(monkeypatch):
     assert options.snapshot("SOXX") is None      # warned, never raises
 
 
+def test_attribution_explains_a_miss():
+    # 7/17-style: all-bearish signals, underlying rallied +2.56% → SOXS missed
+    comps = [{"name": "asia_lead", "value": -0.96, "weight": 0.35},
+             {"name": "trend", "value": -1.0, "weight": 0.15},
+             {"name": "momentum_5d", "value": -0.53, "weight": 0.15},
+             {"name": "futures", "value": -0.70, "weight": 0.2}]
+    a = export._attribution(comps, 0.0256, side="SOXS", bull="SOXL")
+    assert "빗나감" in a["verdict"] and "반전" in a["verdict"]
+    assert a["wrong"] and not a["right"]           # every signal was wrong
+    assert "아시아 선행" in a["wrong"]               # KR label mapped
+
+
+def test_attribution_explains_a_hit():
+    comps = [{"name": "asia_lead", "value": -0.8, "weight": 0.35},
+             {"name": "trend", "value": 0.3, "weight": 0.15}]
+    a = export._attribution(comps, -0.02, side="SOXS", bull="SOXL")  # down → SOXS right
+    assert "적중" in a["verdict"]
+    assert "아시아 선행" in a["right"] and "추세" in a["wrong"]
+
+
+def test_attribution_none_without_label():
+    assert export._attribution([{"name": "trend", "value": 0.5, "weight": 0.15}],
+                               None, "SOXL", "SOXL") is None
+
+
+def test_previous_results_attaches_analysis(tmp_path, monkeypatch):
+    db = tmp_path / "a.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    comps = json.dumps([{"name": "asia_lead", "value": -0.9, "weight": 0.35},
+                        {"name": "trend", "value": -1.0, "weight": 0.15}])
+    with connect(db) as conn:
+        db_upsert(conn, "duel_decisions", [
+            {"pair": "soxl_soxs", "decision_date": "2026-07-17", "side": "SOXS",
+             "score": -0.5, "conviction": 0.5, "components": comps,
+             "correct": 0, "pnl_pct": -0.064, "soxx_oc_ret": 0.0256,
+             "model": "champion", "evaluated_at": "y", "captured_at": "x"},
+            {"pair": "soxl_soxs", "decision_date": "2026-07-20", "side": "SOXS",
+             "score": -0.5, "conviction": 0.5, "model": "champion",
+             "captured_at": "x"},
+        ], immutable=("captured_at",))
+    data = export.collect()
+    card = data["previous"]["cards"][0]
+    assert card["analysis"] is not None
+    assert "빗나감" in card["analysis"]["verdict"]
+    # the verdict text is embedded in the page's window.DATA payload (rendered
+    # client-side); the "왜 맞았나/틀렸나" label lives in the JS template
+    html = export.render_html(data)
+    assert "반전" in html and "틀렸나" in html         # analysis renders
+
+
 def test_render_html_escapes_script_close():
     data = {"generated_at": "t", "calls": {"date": "d", "cards": [
         {"pair": "p", "name": "</script><script>alert(1)</script>",
