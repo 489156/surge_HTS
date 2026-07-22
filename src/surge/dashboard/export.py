@@ -217,6 +217,19 @@ def _learning() -> dict:
              "discovered_new", "verify")}
 
 
+def _discipline() -> dict:
+    """Per-user risk-discipline read + trajectory (성장추적). Empty when the
+    user hasn't opted in — the card simply doesn't render."""
+    from ..duel.discipline import summary, trajectory
+
+    s = summary()
+    if not s:
+        return {}
+    s["trajectory"] = [{"at": t["assessed_at"][:10], "factor": t["factor"]}
+                       for t in trajectory(limit=12)]
+    return s
+
+
 def collect() -> dict:
     """Everything the public page shows. Read-only; per-section degrade-safe."""
     return {
@@ -228,6 +241,7 @@ def collect() -> dict:
         "calibration": _safe(_calibration, {}),
         "weights": _safe(_weights, {}),
         "race": _safe(_race, []),
+        "discipline": _safe(_discipline, {}),
         "learning": _safe(_learning, {}),
     }
 
@@ -473,6 +487,17 @@ if((D.race||[]).length){
   for(const r of D.race)
     html+=`<tr><td>${esc(r.variant)}</td><td>${r.n}</td><td>${pct(r.acc)}</td></tr>`;
   html+='</table></div></section>';
+}
+
+// ── risk-discipline (personalized sizing) ───────────────────────────────────
+const dsc=D.discipline||{};
+if(dsc.factor!=null){
+  const ceil=dsc.equity_ceiling!=null?pct(dsc.equity_ceiling):'—';
+  html+=`<section><h2>투자행동 리스크 규율 — 개인화 사이징 감쇠</h2>
+  <div class="klabel">현재 사이즈 ×${num(dsc.factor,2)} · 삶-비중 상한 ${ceil} · 출처 ${esc(dsc.source||'self')} · ${esc((dsc.assessed_at||'').slice(0,10))}</div>`;
+  if((dsc.trajectory||[]).length>1)
+    html+=`<div class="klabel" style="color:var(--sub);margin-top:6px">규율 궤적(성장추적): ${dsc.trajectory.map(t=>num(t.factor,2)).join(' → ')}</div>`;
+  html+=`<div class="klabel" style="color:var(--sub);margin-top:6px">※ 사이즈만 줄인다 — 확신·방향 불변</div></section>`;
 }
 
 // ── learning log ────────────────────────────────────────────────────────────

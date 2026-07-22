@@ -43,6 +43,7 @@ class DuelDecision:
     rvol_damped: bool = False   # size capped by underlying realized vol
     forced: bool = False        # mandatory-pick override (would have abstained)
     vol_state: float = 0.0      # leading vol-regime stress ∈ [0,1] (volstate.py)
+    size_scale: float = 1.0     # per-user risk-discipline shrink (discipline.py)
 
     @property
     def reasons(self) -> list[str]:
@@ -57,6 +58,9 @@ class DuelDecision:
             out.append(f"선행 변동성 레짐 감쇠: vol_state {self.vol_state:.2f} "
                        f"≥ {settings.duel_volstate_dampen:g} "
                        "(VIX 기간구조 백워데이션·σ5/σ20 가속·SKEW)")
+        if self.size_scale < 1.0 and self.side != "STAND_ASIDE":
+            out.append(f"리스크 규율 감쇠: 투자행동 자가진단 → 사이즈 "
+                       f"×{self.size_scale:.2f}")
         if self.forced:
             out.append("필수매수 제약: 오늘 밤 최고확신 종목으로 강제 선정"
                        " (관망이 +EV였음 — 별도 채점)")
@@ -87,6 +91,16 @@ def _rvol_cap(ctx: dict) -> float:
     return 0.5 if annual >= thr else 1.0
 
 
+def _scaled_pct(sf: float, size_scale: float, size_ceiling: float | None) -> float:
+    """Effective notional = base × conviction leg × per-user discipline shrink,
+    then clamped by the absolute life-share ceiling. size_scale is clamped to
+    [0,1] so it can only REDUCE — never inflate a call."""
+    pct = settings.duel_size_pct * sf * max(0.0, min(1.0, size_scale))
+    if size_ceiling is not None:
+        pct = min(pct, max(0.0, size_ceiling))
+    return round(pct, 4)
+
+
 def _brackets(ctx: dict, side: str,
               entry_ref: dict[str, float] | None) -> tuple:
     atr = (ctx.get("atr_pct") or {}).get(side)
@@ -99,9 +113,12 @@ def _brackets(ctx: dict, side: str,
 
 
 def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
-           mult: dict[str, float] | None = None) -> DuelDecision:
+           mult: dict[str, float] | None = None, size_scale: float = 1.0,
+           size_ceiling: float | None = None) -> DuelDecision:
     """`entry_ref`: optional {leg: reference price} (live last price or open).
-    `mult`: active champion multipliers (None = base weights)."""
+    `mult`: active champion multipliers (None = base weights).
+    `size_scale`/`size_ceiling`: per-user risk-discipline shrink + life-share
+    cap, injected by the live layer (decide stays a pure, DB-free function)."""
     sig = compute_signal(ctx, mult)
     score, conviction = sig["score"], sig["conviction"]
     comps = sig["components"]
@@ -139,10 +156,10 @@ def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
 
     return DuelDecision(
         date=date, pair_id=pid, side=side, score=score, conviction=conviction,
-        size_factor=sf, size_pct=round(settings.duel_size_pct * sf, 4),
+        size_factor=sf, size_pct=_scaled_pct(sf, size_scale, size_ceiling),
         entry_ref=ref, stop_price=stop, target_price=target, atr_pct=atr,
         components=comps, gap_guard=_gap_guard(ctx), rvol_damped=cap < 1.0,
-        vol_state=volstate.vol_state(ctx),
+        vol_state=volstate.vol_state(ctx), size_scale=size_scale,
     )
 
 
@@ -167,7 +184,9 @@ def guard_triggered(side: str, pair: dict, gap_guard: float | None,
 
 def decide_adaptive(ctx: dict, prob_up: float,
                     entry_ref: dict[str, float] | None = None,
-                    components: list[Component] | None = None) -> DuelDecision:
+                    components: list[Component] | None = None,
+                    size_scale: float = 1.0,
+                    size_ceiling: float | None = None) -> DuelDecision:
     """Decision from the walk-forward learner's CALIBRATED P(up). Conviction is
     |2p−1| — a probability, not a vote sum — so the bands mean what they say
     (the static champion's bands demonstrably inverted). Crisis-VIX abstain and
@@ -208,14 +227,16 @@ def decide_adaptive(ctx: dict, prob_up: float,
 
     return DuelDecision(
         date=date, pair_id=pid, side=side, score=score, conviction=conviction,
-        size_factor=sf, size_pct=round(settings.duel_size_pct * sf, 4),
+        size_factor=sf, size_pct=_scaled_pct(sf, size_scale, size_ceiling),
         entry_ref=ref, stop_price=stop, target_price=target, atr_pct=atr,
         components=comps, gap_guard=_gap_guard(ctx), model="adaptive",
         rvol_damped=cap < 1.0, vol_state=volstate.vol_state(ctx),
+        size_scale=size_scale,
     )
 
 
-def promote_forced(d: DuelDecision, pair: dict) -> DuelDecision:
+def promote_forced(d: DuelDecision, pair: dict, size_scale: float = 1.0,
+                   size_ceiling: float | None = None) -> DuelDecision:
     """Mandatory-pick override: turn an abstained decision into a directional
     half-size call. Direction = sign of the (still-computed) vote score; size
     is half, further capped by the realized-vol dampener; brackets reuse the
@@ -235,9 +256,9 @@ def promote_forced(d: DuelDecision, pair: dict) -> DuelDecision:
     return DuelDecision(
         date=d.date, pair_id=d.pair_id, side=side, score=d.score,
         conviction=d.conviction, size_factor=sf,
-        size_pct=round(settings.duel_size_pct * sf, 4),
+        size_pct=_scaled_pct(sf, size_scale, size_ceiling),
         entry_ref=d.entry_ref, stop_price=stop, target_price=target,
         atr_pct=d.atr_pct, components=d.components, model=d.model,
         gap_guard=d.gap_guard, rvol_damped=d.rvol_damped, forced=True,
-        shadow_prob=d.shadow_prob, vol_state=d.vol_state,
+        shadow_prob=d.shadow_prob, vol_state=d.vol_state, size_scale=size_scale,
     )

@@ -96,9 +96,13 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
             if f is not None and len(f):
                 refs[leg] = float(f["close"].iloc[-1])
 
-    from . import factors, variants
+    from . import discipline, factors, variants
 
-    d = decide(ctx, entry_ref=refs, mult=variants.active_multipliers())
+    # per-user risk-discipline shrink + life-share ceiling (1.0/None until the
+    # user runs `surge discipline --assess`; decide stays pure — read here)
+    disc, ceil = discipline.active_factor(), discipline.active_ceiling()
+    d = decide(ctx, entry_ref=refs, mult=variants.active_multipliers(),
+               size_scale=disc, size_ceiling=ceil)
 
     # Walk-forward adaptive engine: every CONFIG races as a SHADOW row (the
     # estimator itself is a hypothesis); the base config's fitted weights are
@@ -112,7 +116,8 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
     if prob is not None:
         if settings.duel_use_adaptive:
             d = decide_adaptive(ctx, prob, entry_ref=refs,
-                                components=d.components)
+                                components=d.components,
+                                size_scale=disc, size_ceiling=ceil)
         d.shadow_prob = prob        # card cites conviction WITH its evidence
 
     _persist(d)
@@ -229,6 +234,7 @@ def apply_mandatory_pick(decided: list[tuple]) -> tuple | None:
     empty, a non-crisis directional call already exists, or only crisis
     abstains remain). The forced row is flagged so it is scored apart from
     genuine calls — the constraint's cost stays measurable."""
+    from . import discipline
     from .decide import promote_forced
 
     if not settings.duel_mandatory_pick or not decided:
@@ -241,7 +247,8 @@ def apply_mandatory_pick(decided: list[tuple]) -> tuple | None:
     if not eligible:
         return None
     pair, d = max(eligible, key=lambda pd: pd[1].conviction)
-    forced = promote_forced(d, pair)
+    forced = promote_forced(d, pair, size_scale=discipline.active_factor(),
+                            size_ceiling=discipline.active_ceiling())
     if not forced.forced:                # promotion declined (crisis)
         return None
     _persist(forced)

@@ -127,6 +127,7 @@ _PRIMARY_KEYS = {
     "adaptive_calibration": "pair, bucket, source",
     "duel_live_context": "pair, decision_date",
     "options_snapshots": "symbol, date",
+    "user_discipline": "assessed_at",
 }
 
 

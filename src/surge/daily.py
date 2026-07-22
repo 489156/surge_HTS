@@ -197,6 +197,14 @@ def run_daily(write: bool = True) -> dict:
                                         for p in pairs.values())}
     volstate_status = _safe("volstate", _volstate, warnings) or {}
 
+    # ── 2.9 DISCIPLINE — per-user risk-behavior self-diagnosis → sizing shrink
+    # (duel/discipline.py). Empty until the user opts in; surfaced so the
+    # discipline trajectory (성장추적) is part of the daily heartbeat. ──
+    def _discipline() -> dict:
+        from .duel.discipline import summary as d_summary
+        return d_summary()
+    discipline_status = _safe("discipline", _discipline, warnings) or {}
+
     # ── 3. JUDGE — current evidence per strategy (the truth gate) ──
     strategies = _safe("verdict", V.assess, warnings) or []
     headline = _safe("headline", V.headline, warnings) or "—"
@@ -240,6 +248,7 @@ def run_daily(write: bool = True) -> dict:
         "promote_ready": promote_ready,   # HITL — surfaced, not executed
         "verify": verify_status,          # 빠른 확신 검증 (교차풀링 + 프라이어워밍)
         "volstate": volstate_status,      # 선행 변동성 레짐 (기간구조·SKEW·σ5/σ20)
+        "discipline": discipline_status,  # 투자행동 리스크 규율 자가진단 → 사이징 감쇠
         "blindspot": blindspot,           # 관망 원인 진단 + 사각지대 fill 레이스
         "variables": variables,           # 변인 추정 드리프트 (adaptive weight trace)
         "cadence": cadence,               # freshness of duel/rotation/surge inputs

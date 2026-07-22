@@ -587,6 +587,45 @@ def _cmd_kr_factors(args) -> int:
     return 0
 
 
+def _cmd_discipline(args) -> int:
+    from .duel import discipline as D
+
+    if args.assess:
+        try:
+            scores = [int(x) for x in args.assess.split(",")]
+        except ValueError:
+            print("  --assess는 콤마구분 정수(0~3) 5개: 예) 3,2,1,3,2")
+            return 1
+        if len(scores) < 5:
+            print("  항목 1–5 점수 5개 필요 (0=위험 … 3=규율적)")
+            return 1
+        row = D.record(scores, life_share=args.equity)
+        print(f"\n  ✔ 자가진단 저장 — factor ×{row['factor']:.2f}"
+              + (f", 삶-비중 상한 {row['equity_ceiling']:.0%}"
+                 if row["equity_ceiling"] is not None else ""))
+
+    row = D.latest()
+    print("\n  ── 투자행동 리스크 규율 자가진단 (개인화 사이징 감쇠) ──")
+    if not row:
+        print("  아직 자가진단 없음 → 사이즈 감쇠 미적용(×1.00)")
+        print("  기록: surge discipline --assess 3,2,1,3,2 [--equity 0.15]")
+        for i, q in enumerate(D.QUESTIONS[:5], 1):
+            print(f"   {i}. [{q['kr']}] {q['prompt']}")
+        print("   6. [삶-비중] --equity: 레버리지가 총자산에서 차지하는 비중(0~1)")
+        print()
+        return 0
+    ceil = (f"{row['equity_ceiling']:.0%}"
+            if row["equity_ceiling"] is not None else "—")
+    print(f"  현재: 사이즈 ×{row['factor']:.2f} · 삶-비중 상한 {ceil} "
+          f"· 출처 {row['source']} · {row['assessed_at'][:10]}")
+    traj = D.trajectory()
+    if len(traj) > 1:
+        curve = " → ".join(f"{t['factor']:.2f}" for t in traj[-8:])
+        print(f"  규율 궤적(성장추적): {curve}")
+    print("  ※ 감쇠는 사이즈만 줄인다 — 확신·방향 불변. 투자자문 아님.\n")
+    return 0
+
+
 def _cmd_duel_gap(args) -> int:
     from .duel import gapanalysis
 
@@ -1413,6 +1452,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="replay search-surge over DataLab history (instant n)")
     sp.add_argument("--days", type=int, default=365, help="backfill look-back days")
     sp.set_defaults(func=_cmd_kr_factors)
+
+    sp = sub.add_parser("discipline",
+                        help="투자행동 리스크 규율 자가진단 → 개인화 사이징 감쇠")
+    sp.add_argument("--assess", help="항목1–5 점수 콤마구분 (0~3): 예) 3,2,1,3,2")
+    sp.add_argument("--equity", type=float, default=None,
+                    help="항목6 삶-비중(0~1) — 야간 사이즈 절대 상한")
+    sp.set_defaults(func=_cmd_discipline)
 
     sp = sub.add_parser("duel-gap",
                         help="why predictions diverged from verification")
