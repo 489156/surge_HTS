@@ -122,15 +122,22 @@ def test_options_fallback_to_yahoo_direct(monkeypatch):
     }]}}
 
     class FakeResp:
+        def __init__(self, *, status=200, text="", data=None):
+            self.status_code = status
+            self.text = text
+            self._data = data
+
         def raise_for_status(self):
             pass
 
         def json(self):
-            return payload
+            return self._data
 
     class FakeClient:
+        """Routes the cookie-prime → getcrumb → options request sequence."""
+
         def __init__(self, *a, **k):
-            pass
+            self.saw_crumb = None
 
         def __enter__(self):
             return self
@@ -139,8 +146,12 @@ def test_options_fallback_to_yahoo_direct(monkeypatch):
             return False
 
         def get(self, url, **k):
-            assert "options/SOXX" in url
-            return FakeResp()
+            if "getcrumb" in url:
+                return FakeResp(text="tok123")
+            if "options/SOXX" in url:
+                self.saw_crumb = (k.get("params") or {}).get("crumb")
+                return FakeResp(data=payload)
+            return FakeResp()                # fc.yahoo.com cookie prime
     monkeypatch.setattr(options.httpx, "Client", FakeClient)
 
     snap = options.snapshot("SOXX")
@@ -165,6 +176,28 @@ def test_options_both_paths_dead_returns_none(monkeypatch):
     monkeypatch.setattr(options.httpx, "Client", DeadClient)
 
     assert options.snapshot("SOXX") is None      # warned, never raises
+
+
+def test_yahoo_crumb_accepts_token_rejects_html():
+    from surge.duel import options
+
+    class Resp:
+        def __init__(self, status, text):
+            self.status_code, self.text = status, text
+
+    class Client:
+        def __init__(self, seq):
+            self.seq = seq
+
+        def get(self, url, **k):
+            if "getcrumb" in url:
+                return self.seq
+            return Resp(200, "")            # fc.yahoo.com cookie prime
+
+    assert options._yahoo_crumb(Client(Resp(200, "abc123\n"))) == "abc123"
+    # an HTML/error body (login wall, rate limit) is NOT a crumb → empty
+    assert options._yahoo_crumb(Client(Resp(200, "<html>nope</html>"))) == ""
+    assert options._yahoo_crumb(Client(Resp(401, "Unauthorized"))) == ""
 
 
 def test_attribution_explains_a_miss():

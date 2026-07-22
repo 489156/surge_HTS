@@ -444,6 +444,10 @@ uv run surge duel-eval         # 지난 콜 사후 채점 → 누적 적중률
   OI·거래량 비율, yfinance 무키)은 `options_snapshots`에 매일 밤 박제 —
   히스토리가 없는 소스라 전방 축적만 가능하며, 몇 달 뒤 후보 변인으로
   승격된다. 리더(NVDA 등) 실적일 근접도도 라이브 컨텍스트에 함께 박제.
+  **(2026-07-22 수리)** 아카이브가 07-03 이후 정체 → Yahoo `/v7/finance/options`가
+  crumb+쿠키 인증을 요구하도록 바뀐 게 원인(quotes.py가 쓰는 chart 엔드포인트는
+  crumb 불필요라 조용히 살아 있었음). `options._yahoo_crumb`가 A1/A3 쿠키를
+  프라임하고 `/v1/test/getcrumb`로 crumb을 받아 붙인다 — 나이틀리 러너에서 검증.
 
 ### 사용법 + 승격 경로
 

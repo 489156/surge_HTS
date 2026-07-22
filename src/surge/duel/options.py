@@ -77,16 +77,44 @@ def _via_yfinance(symbol: str) -> dict | None:
                       chain.puts.to_dict("records"), spot, expiry)
 
 
+_YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _yahoo_crumb(client: httpx.Client) -> str:
+    """Prime Yahoo's identity cookie (A1/A3) and fetch the matching crumb. The
+    /v7/finance/options endpoint began returning 401 'Invalid Crumb' without
+    this pair (2026-07 breakage that froze the archive at 07-03) — the chart
+    endpoint quotes.py uses never needed it, so quotes stayed alive while this
+    silently died. Best-effort: any step failing just yields an empty crumb and
+    the caller still tries the request (some regions still serve crumbless)."""
+    try:
+        client.get("https://fc.yahoo.com/")            # sets the A1/A3 cookies
+    except Exception:  # noqa: BLE001 — cookie prime is best-effort
+        pass
+    try:
+        cr = client.get("https://query1.finance.yahoo.com/v1/test/getcrumb")
+        crumb = cr.text.strip() if cr.status_code == 200 else ""
+    except Exception:  # noqa: BLE001
+        crumb = ""
+    # a valid crumb is a short token; an HTML/error body is not one
+    return crumb if crumb and "<" not in crumb and len(crumb) <= 40 else ""
+
+
 def _via_yahoo_direct(symbol: str) -> dict | None:
     """Path 2 — raw Yahoo options endpoint via httpx (bypasses the yfinance
-    LIBRARY; same client-path redundancy that keeps quotes.py alive)."""
+    LIBRARY; same client-path redundancy that keeps quotes.py alive). Now
+    cookie+crumb authenticated (see _yahoo_crumb)."""
     import datetime as dt
 
-    with httpx.Client(timeout=settings.request_timeout, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    }) as client:
+    with httpx.Client(timeout=settings.request_timeout,
+                      headers={"User-Agent": _YAHOO_UA},
+                      follow_redirects=True) as client:
+        crumb = _yahoo_crumb(client)
+        params = {"crumb": crumb} if crumb else {}
         r = client.get(
-            f"https://query2.finance.yahoo.com/v7/finance/options/{symbol}")
+            f"https://query1.finance.yahoo.com/v7/finance/options/{symbol}",
+            params=params)
         r.raise_for_status()
         res = (r.json().get("optionChain") or {}).get("result") or []
     if not res:
