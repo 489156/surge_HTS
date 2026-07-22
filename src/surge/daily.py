@@ -167,6 +167,36 @@ def run_daily(write: bool = True) -> dict:
                                       if p["provisional"]]}
     verify_status = _safe("verify", _verify, warnings) or {}
 
+    # ── 2.8 VOL-STATE — leading volatility-regime read (duel/volstate.py):
+    # volatility as a CURVE (VIX term structure), a SURFACE (SKEW), and a RATE
+    # OF CHANGE (σ5/σ20), summarized from the point-in-time live context we
+    # already froze tonight. Deterministic (no fetch), token-free. ──
+    def _volstate() -> dict:
+        import json as _json
+
+        from .duel.volstate import summary as vs_summary
+
+        with connect() as conn:
+            latest = conn.execute(
+                "SELECT MAX(decision_date) d FROM duel_live_context").fetchone()
+            date = latest["d"] if latest else None
+            if not date:
+                return {}
+            rows = conn.execute(
+                "SELECT pair, ctx FROM duel_live_context WHERE decision_date = ?",
+                (date,)).fetchall()
+        pairs = {}
+        for r in rows:
+            try:
+                pairs[r["pair"]] = vs_summary(_json.loads(r["ctx"]))
+            except Exception:  # noqa: BLE001 — a bad row must not break the log
+                continue
+        return {"date": date, "pairs": pairs,
+                "any_dampened": any(p.get("dampens") for p in pairs.values()),
+                "any_backwardated": any(p.get("backwardated")
+                                        for p in pairs.values())}
+    volstate_status = _safe("volstate", _volstate, warnings) or {}
+
     # ── 3. JUDGE — current evidence per strategy (the truth gate) ──
     strategies = _safe("verdict", V.assess, warnings) or []
     headline = _safe("headline", V.headline, warnings) or "—"
@@ -209,6 +239,7 @@ def run_daily(write: bool = True) -> dict:
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed
         "verify": verify_status,          # 빠른 확신 검증 (교차풀링 + 프라이어워밍)
+        "volstate": volstate_status,      # 선행 변동성 레짐 (기간구조·SKEW·σ5/σ20)
         "blindspot": blindspot,           # 관망 원인 진단 + 사각지대 fill 레이스
         "variables": variables,           # 변인 추정 드리프트 (adaptive weight trace)
         "cadence": cadence,               # freshness of duel/rotation/surge inputs
