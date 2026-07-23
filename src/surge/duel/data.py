@@ -35,6 +35,11 @@ ASIA = {  # name -> (ticker, weight within the Asia composite)
 # environment" expansion that feeds the shadow-FACTOR search: HY credit (risk
 # appetite), the US dollar (semis are global/export), long bonds (duration bid).
 EXTRA_MACRO = {"credit": "HYG", "dollar": "UUP", "bonds": "TLT"}
+# Volatility term-structure & surface (keyless CBOE/Yahoo indices) — the real-
+# time vol-REGIME inputs read as a CURVE, not a level (see duel/volstate.py):
+# VIX9D (9-day fwd), VIX3M (3-month), SKEW (tail/crash pricing). Absent ⇒ the
+# vol_state read just uses fewer sub-signals (degrade-safe, never a false alarm).
+VOL_MACRO = {"vix9d": "^VIX9D", "vix3m": "^VIX3M", "skew": "^SKEW"}
 
 
 def _tidy(df: pd.DataFrame) -> pd.DataFrame:
@@ -63,6 +68,10 @@ def fetch_shared(period: str = "2y") -> dict[str, pd.DataFrame]:
         df = market.download_ohlcv([ticker], period=period)
         if not df.empty:                              # absent ⇒ those factors stay silent
             frames[name] = _tidy(df)
+    for name, ticker in VOL_MACRO.items():            # vol term-structure / surface
+        df = market.download_ohlcv([ticker], period=period)
+        if not df.empty:                              # absent ⇒ vol_state uses fewer inputs
+            frames[name] = _tidy(df)
     df = market.download_ohlcv([MARKET_PROXY], period=period)
     if not df.empty:                                  # relative-strength benchmark
         frames[MARKET_PROXY] = _tidy(df)
@@ -85,6 +94,18 @@ def fetch_frames(period: str = "2y", pair: dict | None = None,
     if shared is None:
         frames.update(fetch_shared(period))
     return frames
+
+
+def _garman_klass(df: pd.DataFrame) -> pd.Series:
+    """Per-bar Garman-Klass daily σ from OHLC (range-based, ~5–8× more efficient
+    than close-close). Rolled + shifted by the caller for leak safety."""
+    import numpy as np
+
+    o, h, low, c = df["open"], df["high"], df["low"], df["close"]
+    hl = np.log((h / low).where((h > 0) & (low > 0)))
+    co = np.log((c / o).where((c > 0) & (o > 0)))
+    var = 0.5 * hl * hl - (2 * np.log(2) - 1) * co * co
+    return np.sqrt(var.clip(lower=0)).rename("gk")
 
 
 def _atr_pct(df: pd.DataFrame, n: int = 14) -> pd.Series:
@@ -116,6 +137,12 @@ def prepare(frames: dict[str, pd.DataFrame], pair: dict | None = None,
         s["f_ret1"] = ret.shift(1)
         s["f_ret5"] = s["close"].pct_change(5).shift(1)
         s["f_vol20"] = ret.rolling(20).std().shift(1)
+        # short-window realized vol (σ5) + Garman-Klass range vol — the LEADING
+        # vol-regime inputs (σ5/σ20 acceleration, OHLC-range σ), all shifted so
+        # row D = knowledge at D−1. Fed to volstate.vol_state for sizing only.
+        s["f_vol5"] = ret.rolling(5).std().shift(1)
+        if {"open", "high", "low"}.issubset(s.columns):
+            s["f_gk5"] = _garman_klass(s).rolling(5).mean().shift(1)
         s["f_sma50_dist"] = (s["close"] / s["close"].rolling(50).mean() - 1).shift(1)
         # Intraday-aware features: the LABEL is open→close, but close→close
         # features mix in the overnight gap. Decompose so the learner can see
@@ -167,6 +194,13 @@ def prepare(frames: dict[str, pd.DataFrame], pair: dict | None = None,
             x["f_chg"] = x["close"].pct_change().shift(1)
             out[name] = x
 
+    for name in VOL_MACRO:                         # vol term-structure / surface
+        if name in frames:
+            x = frames[name].copy()
+            x["f_level"] = x["close"].shift(1)     # leak-safe D−1 level
+            x["f_chg"] = x["close"].pct_change().shift(1)
+            out[name] = x
+
     for leg in (pair["bull"], pair["bear"]):
         if leg in frames:
             e = frames[leg].copy()
@@ -189,7 +223,9 @@ def _base_ctx(pair: dict, date: str) -> dict:
         "und_ret1": None, "und_ret5": None, "und_vol20": None,
         "und_sma50_dist": None, "und_oc_mom5": None, "und_oc1": None,
         "und_gap1": None, "und_rel20": None, "und_rsi": None, "und_rvol": None,
+        "und_vol5": None, "und_gk_vol": None,
         "vix_level": None, "vix_chg": None,
+        "vix9d": None, "vix3m": None, "skew_level": None, "skew_chg": None,
         "tnx_chg": None, "credit_chg": None, "dollar_chg": None,
         "bonds_chg": None, "asia": {}, "futures_ret": None, "atr_pct": {},
     }
@@ -213,7 +249,8 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
     )
     for key, col in (("und_oc_mom5", "f_oc_mom5"), ("und_oc1", "f_oc1"),
                      ("und_gap1", "f_gap1"), ("und_rel20", "f_rel20"),
-                     ("und_rsi", "f_rsi14"), ("und_rvol", "f_rvol20")):
+                     ("und_rsi", "f_rsi14"), ("und_rvol", "f_rvol20"),
+                     ("und_vol5", "f_vol5"), ("und_gk_vol", "f_gk5")):
         v = row.get(col)
         if v is not None and not pd.isna(v):
             ctx[key] = float(v)
@@ -221,6 +258,15 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
     if vix is not None and date in vix.index and not pd.isna(vix.loc[date, "f_level"]):
         ctx["vix_level"] = float(vix.loc[date, "f_level"])
         ctx["vix_chg"] = float(vix.loc[date, "f_chg"])
+    for key, name in (("vix9d", "vix9d"), ("vix3m", "vix3m")):
+        f = prepared.get(name)
+        if f is not None and date in f.index and not pd.isna(f.loc[date, "f_level"]):
+            ctx[key] = float(f.loc[date, "f_level"])
+    sk = prepared.get("skew")
+    if sk is not None and date in sk.index and not pd.isna(sk.loc[date, "f_level"]):
+        ctx["skew_level"] = float(sk.loc[date, "f_level"])
+        if not pd.isna(sk.loc[date, "f_chg"]):
+            ctx["skew_chg"] = float(sk.loc[date, "f_chg"])
     tnx = prepared.get("^TNX")
     if tnx is not None and date in tnx.index and not pd.isna(tnx.loc[date, "f_chg"]):
         ctx["tnx_chg"] = float(tnx.loc[date, "f_chg"])
@@ -261,6 +307,13 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
         und_vol20=float(rets.rolling(20).std().iloc[-1]),
         und_sma50_dist=float(closes.iloc[-1] / closes.rolling(50).mean().iloc[-1] - 1),
     )
+    v5 = rets.rolling(5).std().iloc[-1]              # σ5 for vol acceleration
+    if not pd.isna(v5):
+        ctx["und_vol5"] = float(v5)
+    if {"open", "high", "low"}.issubset(und.columns):
+        gk = _garman_klass(und).rolling(5).mean().iloc[-1]
+        if not pd.isna(gk):
+            ctx["und_gk_vol"] = float(gk)
     oc = und["close"] / und["open"] - 1              # completed bars only
     gap = und["open"] / und["close"].shift(1) - 1
     if len(oc) >= 5 and not pd.isna(oc.iloc[-5:].mean()):
@@ -289,6 +342,14 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
     if vix is not None and len(vix) >= 2:
         ctx["vix_level"] = float(vix["close"].iloc[-1])
         ctx["vix_chg"] = float(vix["close"].pct_change().iloc[-1])
+    for key, name in (("vix9d", "vix9d"), ("vix3m", "vix3m")):
+        f = prepared.get(name)
+        if f is not None and len(f) >= 1 and not pd.isna(f["close"].iloc[-1]):
+            ctx[key] = float(f["close"].iloc[-1])
+    sk = prepared.get("skew")
+    if sk is not None and len(sk) >= 2 and not pd.isna(sk["close"].iloc[-1]):
+        ctx["skew_level"] = float(sk["close"].iloc[-1])
+        ctx["skew_chg"] = float(sk["close"].pct_change().iloc[-1])
     tnx = prepared.get("^TNX")
     if tnx is not None and len(tnx) >= 2:
         ctx["tnx_chg"] = float(tnx["close"].diff().iloc[-1])
@@ -322,12 +383,25 @@ def archive_symbols() -> list[str]:
 def archive(period: str = "max") -> dict:
     """Persist daily bars for the whole registry into price_history. Idempotent
     upserts; run incrementally (e.g. '3mo') daily, or 'max' once for backfill."""
+    from ..quality import assess_frame
+
     total = 0
     per_symbol: dict[str, int] = {}
+    rejected: dict[str, list[str]] = {}
     for sym in archive_symbols():
         df = market.download_ohlcv([sym], period=period)
         if df.empty:
             per_symbol[sym] = 0
+            continue
+        # integrity gate on the RAW vendor frame (before _tidy sorts/dedups, so
+        # the monotonic/duplicate checks are meaningful): never persist a
+        # corrupt frame into the immutable archive.
+        q = assess_frame(df, symbol=sym, asof=utc_now(), min_rows=1)
+        if not q["hard_ok"]:
+            rejected[sym] = q["reasons"]
+            per_symbol[sym] = 0
+            logger.warning("price_history REJECT {} — {}", sym,
+                           " · ".join(q["reasons"]))
             continue
         rows = [
             {
@@ -343,9 +417,9 @@ def archive(period: str = "max") -> dict:
             upsert(conn, "price_history", rows)
         per_symbol[sym] = len(rows)
         total += len(rows)
-    logger.info("price_history archive: {} rows across {} symbols",
-                total, len(per_symbol))
-    return {"total_rows": total, "symbols": per_symbol}
+    logger.info("price_history archive: {} rows across {} symbols "
+                "({} rejected)", total, len(per_symbol), len(rejected))
+    return {"total_rows": total, "symbols": per_symbol, "rejected": rejected}
 
 
 def frames_from_archive(pair: dict | None = None) -> dict[str, pd.DataFrame]:

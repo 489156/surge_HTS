@@ -126,6 +126,21 @@ class Settings(BaseSettings):
     # σ20) is at/above this, cap size at half — a bet is fine, full leverage on
     # a 3x product amid 50%+ realized vol is not. 0 disables.
     duel_rvol_dampen_annual: float = 0.50
+    # LEADING volatility-regime dampener (duel/volstate.py) — the forward-looking
+    # complement to the trailing σ20 cap above. Reads volatility's TERM STRUCTURE
+    # (VIX9D/VIX/VIX3M backwardation), SURFACE (CBOE SKEW), and ACCELERATION
+    # (σ5/σ20) into vol_state ∈ [0,1]; at/above this it caps size at half BEFORE
+    # trailing σ20 catches up. Sizing-only (can never raise conviction), so no
+    # directional edge to overfit. 0 disables. Silent on nights lacking the vol-
+    # curve fetch (degrade-safe: fewer sub-signals, never a false alarm).
+    duel_volstate_dampen: float = 0.60
+    # Investor risk-discipline dampener (duel/discipline.py) — a per-USER sizing
+    # shrink from a behavior self-diagnosis. Worst-discipline floor: an
+    # undisciplined self-report caps size at this fraction; fully disciplined =
+    # 1.0 (no shrink). Sizing-only, can never inflate. 0-effect until the user
+    # runs `surge discipline --assess` (no row on file → factor 1.0).
+    duel_discipline_floor: float = 0.40
+    duel_discipline_min_n: int = 20        # behavioral-anchoring sample gate (phase 2)
     # Mandatory pick — never abstain on ALL pairs; commit the single highest-
     # conviction call each night (half size, gap-guard/crisis still respected).
     # This OVERRIDES the "abstain is +EV" default by user policy, so every

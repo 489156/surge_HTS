@@ -27,6 +27,31 @@ import json
 from .db import connect, utc_now
 
 
+def _provenance() -> dict:
+    """Reproducibility stamp — the exact code + runtime that produced this run,
+    so any recorded result can be traced back and re-run. git commit from the
+    Actions env (GITHUB_SHA) or a local `git rev-parse`, package + Python ver."""
+    import os
+    import platform
+    import subprocess
+
+    sha = os.environ.get("GITHUB_SHA")
+    if not sha:
+        try:
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                timeout=5).stdout.strip() or None
+        except Exception:  # noqa: BLE001 — provenance must never break the run
+            sha = None
+    try:
+        from importlib.metadata import version
+        ver = version("surge")
+    except Exception:  # noqa: BLE001
+        ver = None
+    return {"git_commit": sha, "code_version": ver,
+            "python": platform.python_version()}
+
+
 def _safe(label: str, fn, warnings: list[str]):
     """Run one loop step; on any failure record a Korean warning and keep going."""
     try:
@@ -167,6 +192,53 @@ def run_daily(write: bool = True) -> dict:
                                       if p["provisional"]]}
     verify_status = _safe("verify", _verify, warnings) or {}
 
+    # ── 2.8 VOL-STATE — leading volatility-regime read (duel/volstate.py):
+    # volatility as a CURVE (VIX term structure), a SURFACE (SKEW), and a RATE
+    # OF CHANGE (σ5/σ20), summarized from the point-in-time live context we
+    # already froze tonight. Deterministic (no fetch), token-free. ──
+    def _volstate() -> dict:
+        import json as _json
+
+        from .duel.volstate import summary as vs_summary
+
+        with connect() as conn:
+            latest = conn.execute(
+                "SELECT MAX(decision_date) d FROM duel_live_context").fetchone()
+            date = latest["d"] if latest else None
+            if not date:
+                return {}
+            rows = conn.execute(
+                "SELECT pair, ctx FROM duel_live_context WHERE decision_date = ?",
+                (date,)).fetchall()
+        pairs = {}
+        for r in rows:
+            try:
+                pairs[r["pair"]] = vs_summary(_json.loads(r["ctx"]))
+            except Exception:  # noqa: BLE001 — a bad row must not break the log
+                continue
+        return {"date": date, "pairs": pairs,
+                "any_dampened": any(p.get("dampens") for p in pairs.values()),
+                "any_backwardated": any(p.get("backwardated")
+                                        for p in pairs.values())}
+    volstate_status = _safe("volstate", _volstate, warnings) or {}
+
+    # ── 2.9 DISCIPLINE — per-user risk-behavior self-diagnosis → sizing shrink
+    # (duel/discipline.py). Empty until the user opts in; surfaced so the
+    # discipline trajectory (성장추적) is part of the daily heartbeat. ──
+    def _discipline() -> dict:
+        from .duel.discipline import summary as d_summary
+        return d_summary()
+    discipline_status = _safe("discipline", _discipline, warnings) or {}
+
+    # ── 2.10 DATA QUALITY — read-only integrity check on the immutable archive
+    # (non-positive prints, stale feeds). Corruption surfaces nightly instead of
+    # silently poisoning features (see surge/quality.py). ──
+    def _quality() -> dict:
+        from .quality import archive_integrity
+        with connect() as conn:
+            return archive_integrity(conn)
+    quality_status = _safe("quality", _quality, warnings) or {}
+
     # ── 3. JUDGE — current evidence per strategy (the truth gate) ──
     strategies = _safe("verdict", V.assess, warnings) or []
     headline = _safe("headline", V.headline, warnings) or "—"
@@ -209,6 +281,10 @@ def run_daily(write: bool = True) -> dict:
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed
         "verify": verify_status,          # 빠른 확신 검증 (교차풀링 + 프라이어워밍)
+        "provenance": _safe("provenance", _provenance, warnings) or {},
+        "quality": quality_status,        # 아카이브 무결성 (비양수·stale 피드)
+        "volstate": volstate_status,      # 선행 변동성 레짐 (기간구조·SKEW·σ5/σ20)
+        "discipline": discipline_status,  # 투자행동 리스크 규율 자가진단 → 사이징 감쇠
         "blindspot": blindspot,           # 관망 원인 진단 + 사각지대 fill 레이스
         "variables": variables,           # 변인 추정 드리프트 (adaptive weight trace)
         "cadence": cadence,               # freshness of duel/rotation/surge inputs

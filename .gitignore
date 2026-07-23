@@ -4,6 +4,12 @@ __pycache__/
 .env
 .pytest_cache/
 .ruff_cache/
+# Editor / agent / generated artifacts — never commit (code-review 2026-07-22)
+.claude/
+.vscode/
+.idea/
+compass_artifact_*.md
+*.parquet
 # Local DB transients — never commit (per-process, not portable)
 *.db-wal
 *.db-shm

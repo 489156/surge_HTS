@@ -61,6 +61,9 @@ jobs:
           surge adaptive --calibrate --offline --pair all   # 확신 구간 원장 갱신
           surge rotation
           surge rotation-eval
+          surge kr-factors --backfill --days 45   # KR 섀도 팩터 원장 전진+채점
+                                   # (검색급등/policy_tagged가 +10%/T+5를 선별하는가;
+                                   # 로컬 루틴 은퇴 후 파이프라인이 유일 갱신자)
           surge daily            # score → evolve → judge → record (learning_log)
           exit 0
 

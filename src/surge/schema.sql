@@ -506,3 +506,15 @@ CREATE TABLE IF NOT EXISTS learning_log (
     created_at  TEXT NOT NULL,      -- UTC timestamp
     payload     TEXT NOT NULL       -- JSON: scored counts, evidence per strategy,
 );                                  --       discovered hypotheses, changes, warnings
+
+-- ── Investor risk-discipline self-diagnosis (duel/discipline.py) ─────────────
+-- Each row is one assessment; active_factor reads the LATEST. source='self'
+-- now; a later phase writes source='behavioral' from realized adherence so
+-- observed behavior can override the self-report (like OOS anchoring).
+CREATE TABLE IF NOT EXISTS user_discipline (
+    assessed_at    TEXT PRIMARY KEY,   -- UTC timestamp of the assessment
+    scores         TEXT NOT NULL,      -- JSON [0..3]×6
+    factor         REAL NOT NULL,      -- derived sizing shrink ∈ [floor, 1.0]
+    equity_ceiling REAL,               -- absolute per-night notional cap (0..1)
+    source         TEXT DEFAULT 'self' -- 'self' | 'behavioral'
+);

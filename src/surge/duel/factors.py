@@ -215,6 +215,31 @@ def _silent_gap_follow(ctx: dict) -> float | None:
     return _clip(math.tanh(v / vol / 1.5))
 
 
+# ── volatility term-structure / surface reads (2026-07-22): the DIRECTION-
+# flavored side of the vol-regime sensor (volstate.py). Sizing gets vol_state
+# directly; here the SIGNED hypotheses race for forward directional value under
+# the same gate as every other candidate — nothing promoted on narrative. ─────
+def _vix_backwardation_bear(ctx: dict) -> float | None:
+    """VIX term-structure BACKWARDATION (near > far) prices imminent stress →
+    hypothesis: bearish for the 3x long leg. Contango (calm) → mild bull. Sign
+    from volstate.vix_term_slope; None when the term structure is unavailable."""
+    from .volstate import vix_term_slope
+
+    s = vix_term_slope(ctx)
+    return None if s is None else _clip(-math.tanh(s / 0.05))
+
+
+def _skew_tail_bear(ctx: dict) -> float | None:
+    """Elevated CBOE SKEW = crash-hedging demand in the tail → hypothesis:
+    bearish. Fires only when SKEW is present AND meaningfully above ~120 (the
+    factor race then scores it only on the sessions it actually speaks)."""
+    lvl = ctx.get("skew_level")
+    if lvl is None:
+        return None
+    stress = (float(lvl) - 120.0) / 30.0
+    return None if stress <= 0 else _clip(-stress)
+
+
 CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "asia_breadth": _asia_breadth,
     "und_accel": _und_accel,
@@ -231,6 +256,9 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "rel_strength": _rel_strength,
     "fomc_eve_drift": _fomc_eve_drift,
     "rsi_reversal": _rsi_reversal,
+    # volatility term-structure / surface (signed directional hypotheses)
+    "vix_backwardation": _vix_backwardation_bear,
+    "skew_tail": _skew_tail_bear,
     # blind-spot fills — raced exactly on the abstain-cause populations
     "weak_drift": _weak_drift,
     "conflict_asia_tiebreak": _conflict_asia_tiebreak,
