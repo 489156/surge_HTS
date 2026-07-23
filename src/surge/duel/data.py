@@ -383,12 +383,25 @@ def archive_symbols() -> list[str]:
 def archive(period: str = "max") -> dict:
     """Persist daily bars for the whole registry into price_history. Idempotent
     upserts; run incrementally (e.g. '3mo') daily, or 'max' once for backfill."""
+    from ..quality import assess_frame
+
     total = 0
     per_symbol: dict[str, int] = {}
+    rejected: dict[str, list[str]] = {}
     for sym in archive_symbols():
         df = market.download_ohlcv([sym], period=period)
         if df.empty:
             per_symbol[sym] = 0
+            continue
+        # integrity gate on the RAW vendor frame (before _tidy sorts/dedups, so
+        # the monotonic/duplicate checks are meaningful): never persist a
+        # corrupt frame into the immutable archive.
+        q = assess_frame(df, symbol=sym, asof=utc_now(), min_rows=1)
+        if not q["hard_ok"]:
+            rejected[sym] = q["reasons"]
+            per_symbol[sym] = 0
+            logger.warning("price_history REJECT {} — {}", sym,
+                           " · ".join(q["reasons"]))
             continue
         rows = [
             {
@@ -404,9 +417,9 @@ def archive(period: str = "max") -> dict:
             upsert(conn, "price_history", rows)
         per_symbol[sym] = len(rows)
         total += len(rows)
-    logger.info("price_history archive: {} rows across {} symbols",
-                total, len(per_symbol))
-    return {"total_rows": total, "symbols": per_symbol}
+    logger.info("price_history archive: {} rows across {} symbols "
+                "({} rejected)", total, len(per_symbol), len(rejected))
+    return {"total_rows": total, "symbols": per_symbol, "rejected": rejected}
 
 
 def frames_from_archive(pair: dict | None = None) -> dict[str, pd.DataFrame]:
