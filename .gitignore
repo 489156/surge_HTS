@@ -14,11 +14,13 @@ compass_artifact_*.md
 *.db-wal
 *.db-shm
 
-# data/: commit ONLY the canonical SQLite state — the pipeline's persistent
-# learning memory that GitHub Actions reads at job start and updates daily.
-# Everything else under data/ (logs, dumps, scratch) stays local.
-data/*
-!data/surge.db
+# data/: the SQLite archive is NO LONGER committed to main (2026-07-23). The
+# 84MB binary lived on main and was re-committed every run — bloating history +
+# causing recurring binary merge conflicts on every PR. It now lives on the
+# orphan `data` branch (single-commit snapshot, force-pushed each run); the
+# pipeline restores it at job start and persists it back there. main is code
+# only. See docs/DATA_BRANCH.md.
+data/
 
 # Phase 2 static export (built by CI, never committed)
 site/

@@ -2,7 +2,9 @@ name: surge-daily-pipeline
 
 # Token-free daily automation: replaces the Claude Code routines with GitHub Actions.
 # The whole pipeline (crawl → score → evolve → judge → record) is deterministic Python
-# with ZERO LLM calls, so it runs free inside GitHub's runners and commits its state back.
+# with ZERO LLM calls, so it runs free inside GitHub's runners. The SQLite archive is
+# NOT committed to main — it is restored from and persisted to the orphan `data` branch
+# (single-commit snapshot, force-pushed, shrink-guarded). main stays code-only.
 
 on:
   schedule:
@@ -37,6 +39,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore the SQLite archive from the data branch
+        # The 84MB archive lives on the orphan `data` branch, NOT main (main is
+        # code only). Pull it in; verify it opens with schema, else discard so
+        # `surge init` recreates it (bootstrap). A missing/invalid restore is
+        # caught by the persist step's shrink guard, which refuses to overwrite
+        # the branch with a smaller DB — so a bad restore FAILS the run instead
+        # of destroying the accumulated archive.
+        run: |
+          mkdir -p data
+          if git fetch --depth=1 origin data 2>/dev/null; then
+            git cat-file -p origin/data:surge.db > data/surge.db \
+              && echo "restored $(stat -c%s data/surge.db) bytes from data branch"
+          else
+            echo "no data branch yet — bootstrap fresh"
+          fi
+          python3 -c "import sqlite3,sys; sys.exit(0 if sqlite3.connect('data/surge.db').execute('SELECT count(*) FROM sqlite_master').fetchone()[0]>0 else 1)" 2>/dev/null \
+            || { echo "archive missing/invalid — re-init schema"; rm -f data/surge.db; }
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -67,17 +87,28 @@ jobs:
           surge daily            # score → evolve → judge → record (learning_log)
           exit 0
 
-      - name: Commit the updated state back to the repo
+      - name: Persist the archive to the data branch (fail-safe, never shrinks)
+        # Single-commit orphan snapshot, force-pushed to `data`. Shrink guard:
+        # never overwrite the branch with a DB < 90% of what's already there —
+        # a truncated run or failed restore fails the job VISIBLY instead of
+        # clobbering the accumulated archive. Plumbing (hash-object/mktree/
+        # commit-tree) keeps the branch a single commit (no history bloat).
         run: |
           git config user.name  "surge-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A data 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "no data changes this run"
-          else
-            git commit -m "chore(data): pipeline run $(date -u +'%Y-%m-%dT%H:%MZ')"
-            git push
+          test -s data/surge.db || { echo "::error::no surge.db to persist"; exit 1; }
+          new=$(stat -c%s data/surge.db)
+          git fetch --depth=1 origin data 2>/dev/null || true
+          old=$(git cat-file -s origin/data:surge.db 2>/dev/null || echo 0)
+          if [ "$old" -gt 0 ] && [ "$new" -lt "$((old * 90 / 100))" ]; then
+            echo "::error::archive shrink guard: new ${new}B < 90% of existing ${old}B — refusing to persist"
+            exit 1
           fi
+          blob=$(git hash-object -w data/surge.db)
+          tree=$(printf '100644 blob %s\tsurge.db\n' "$blob" | git mktree)
+          commit=$(git commit-tree "$tree" -m "chore(data): pipeline run $(date -u +'%Y-%m-%dT%H:%MZ')")
+          git push --force origin "$commit:refs/heads/data"
+          echo "persisted ${new}B to data branch (was ${old}B)"
 
   # PHASE 2 (wired 2026-07-09): publish tonight's calls + verification ledgers as a
   # static read-only page, so the daily results are viewable from any phone at the
@@ -92,7 +123,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main            # pick up the DB state the pipeline job just pushed
+          ref: main            # code only — the DB lives on the data branch
+
+      - name: Restore the SQLite archive from the data branch
+        # the pipeline job persisted the fresh DB to `data`; pull it in so the
+        # exported page reflects tonight's run. Degrade-safe: no branch → empty
+        # page (never crashes).
+        run: |
+          mkdir -p data
+          if git fetch --depth=1 origin data 2>/dev/null; then
+            git cat-file -p origin/data:surge.db > data/surge.db \
+              && echo "restored $(stat -c%s data/surge.db) bytes for export"
+          else
+            echo "no data branch — exporting empty page"
+          fi
 
       - uses: actions/setup-python@v5
         with:
