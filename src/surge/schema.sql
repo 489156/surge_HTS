@@ -518,3 +518,18 @@ CREATE TABLE IF NOT EXISTS user_discipline (
     equity_ceiling REAL,               -- absolute per-night notional cap (0..1)
     source         TEXT DEFAULT 'self' -- 'self' | 'behavioral'
 );
+
+-- Phase-2 anchoring: the user's ACTUAL executed size vs the call's recommended
+-- size, logged per (session, pair). Once enough samples accumulate, a
+-- 'behavioral' user_discipline row is derived so observed over-sizing overrides
+-- the self-report (the OOS-anchoring analogue). User-driven — the fills ledger
+-- has no link to duel calls, so the user records adherence explicitly.
+CREATE TABLE IF NOT EXISTS discipline_adherence (
+    decision_date   TEXT NOT NULL,
+    pair            TEXT NOT NULL,
+    recommended_pct REAL,              -- size_factor × duel_size_pct at call time
+    actual_pct      REAL NOT NULL,     -- what the user actually deployed
+    adherence       REAL,              -- actual / recommended (>1 = over-sized)
+    logged_at       TEXT NOT NULL,
+    PRIMARY KEY (decision_date, pair)
+);

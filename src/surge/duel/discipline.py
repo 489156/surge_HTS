@@ -131,12 +131,85 @@ def trajectory(limit: int = 24) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── Phase 2: behavioral anchoring (observed over-sizing overrides self-report) ──
+def _latest_self_ceiling() -> float | None:
+    try:
+        with connect() as conn:
+            r = conn.execute("SELECT equity_ceiling FROM user_discipline "
+                             "WHERE source='self' ORDER BY assessed_at DESC "
+                             "LIMIT 1").fetchone()
+        return r["equity_ceiling"] if r else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def behavioral_factor(min_n: int | None = None) -> dict | None:
+    """Derive a sizing factor from OBSERVED adherence: if the user systematically
+    deploys MORE than the recommended size (mean adherence > 1), that is
+    undisciplined and earns a tighter factor (≈ 1/mean_adherence, floored).
+    Under-sizing is not penalised. None until ≥ min_n logged samples — never
+    overrides the self-report on thin data."""
+    min_n = settings.duel_discipline_min_n if min_n is None else min_n
+    try:
+        with connect() as conn:
+            rows = conn.execute("SELECT adherence FROM discipline_adherence "
+                                "WHERE adherence IS NOT NULL").fetchall()
+    except Exception:  # noqa: BLE001 — missing table / fresh DB
+        return None
+    vals = [float(r["adherence"]) for r in rows if r["adherence"] is not None]
+    if len(vals) < min_n:
+        return None
+    mean_adh = sum(vals) / len(vals)
+    floor = settings.duel_discipline_floor
+    factor = round(max(floor, min(1.0, 1.0 / mean_adh)) if mean_adh > 0 else 1.0, 4)
+    return {"factor": factor, "n": len(vals), "mean_adherence": round(mean_adh, 3)}
+
+
+def _refresh_behavioral() -> None:
+    """Recompute the behavioral factor and, if available, write it as the latest
+    user_discipline row (source='behavioral') so active_factor picks it up —
+    observed behavior overriding the stated score, OOS-anchoring style."""
+    b = behavioral_factor()
+    if not b:
+        return
+    with connect() as conn:
+        upsert(conn, "user_discipline", [{
+            "assessed_at": _now(),
+            "scores": json.dumps({"behavioral": True, "n": b["n"],
+                                  "mean_adherence": b["mean_adherence"]},
+                                 ensure_ascii=False),
+            "factor": b["factor"], "equity_ceiling": _latest_self_ceiling(),
+            "source": "behavioral"}], immutable=())
+
+
+def record_adherence(decision_date: str, pair: str, actual_pct: float) -> dict:
+    """Log the user's ACTUAL deployed size for one call vs its recommendation
+    (size_factor × duel_size_pct, read from the stored decision). Refreshes the
+    behavioral factor. The fills ledger has no link to duel calls, so this is the
+    honest feed — real user data in, no fabrication."""
+    with connect() as conn:
+        r = conn.execute("SELECT size_factor FROM duel_decisions "
+                         "WHERE decision_date=? AND pair=?",
+                         (decision_date, pair)).fetchone()
+        rec = (float(r["size_factor"]) * settings.duel_size_pct
+               if r and r["size_factor"] is not None else None)
+        adh = (float(actual_pct) / rec) if rec else None
+        upsert(conn, "discipline_adherence", [{
+            "decision_date": decision_date, "pair": pair,
+            "recommended_pct": rec, "actual_pct": float(actual_pct),
+            "adherence": adh, "logged_at": _now()}], immutable=())
+    _refresh_behavioral()
+    return {"decision_date": decision_date, "pair": pair,
+            "recommended_pct": rec, "adherence": round(adh, 3) if adh else None}
+
+
 def summary() -> dict:
     """Compact read for the learning log / dashboard. Empty dict when no
     assessment exists (the section simply doesn't render)."""
     row = latest()
     if not row:
         return {}
+    b = behavioral_factor()
     return {
         "factor": row["factor"],
         "equity_ceiling": row["equity_ceiling"],
@@ -144,4 +217,6 @@ def summary() -> dict:
         "assessed_at": row["assessed_at"],
         "n_assessments": len(trajectory(limit=1000)),
         "shrinks": (row["factor"] or 1.0) < 1.0,
+        "adherence_n": b["n"] if b else 0,
+        "mean_adherence": b["mean_adherence"] if b else None,
     }

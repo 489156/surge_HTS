@@ -588,7 +588,27 @@ def _cmd_kr_factors(args) -> int:
 
 
 def _cmd_discipline(args) -> int:
+    from .config import settings
     from .duel import discipline as D
+
+    if args.log:
+        date, pair, actual = args.log
+        try:
+            r = D.record_adherence(date, pair, float(actual))
+        except ValueError:
+            print("  --log DATE PAIR ACTUAL_PCT (예: 2026-07-21 soxl_soxs 0.15)")
+            return 1
+        rec = f"{r['recommended_pct']:.0%}" if r["recommended_pct"] is not None else "—"
+        adh = f"×{r['adherence']:.2f}" if r["adherence"] is not None else "—"
+        print(f"\n  ✔ 실행 사이즈 기록: {date} {pair} · 실제 {float(actual):.0%} vs "
+              f"권장 {rec} · 준수도 {adh}")
+        b = D.behavioral_factor()
+        if b:
+            print(f"  → 행동 기반 감쇠 활성: 사이즈 ×{b['factor']:.2f} "
+                  f"(표본 {b['n']} · 평균준수도 ×{b['mean_adherence']:.2f}) — 자가보고 대체")
+        else:
+            need = settings.duel_discipline_min_n
+            print(f"  (행동 앵커링은 표본 {need}개 이상부터 자가보고를 대체)")
 
     if args.assess:
         try:
@@ -1458,6 +1478,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--assess", help="항목1–5 점수 콤마구분 (0~3): 예) 3,2,1,3,2")
     sp.add_argument("--equity", type=float, default=None,
                     help="항목6 삶-비중(0~1) — 야간 사이즈 절대 상한")
+    sp.add_argument("--log", nargs=3, metavar=("DATE", "PAIR", "ACTUAL_PCT"),
+                    help="실행 사이즈 기록(행동 앵커링): 콜의 권장 대비 실제 비중")
     sp.set_defaults(func=_cmd_discipline)
 
     sp = sub.add_parser("duel-gap",

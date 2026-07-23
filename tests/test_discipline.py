@@ -4,7 +4,8 @@ import json
 
 from surge.config import settings
 from surge.dashboard import export
-from surge.db import init_db
+from surge.db import connect, init_db
+from surge.db import upsert as db_upsert
 from surge.duel import discipline as D
 from surge.duel.decide import DuelDecision, decide, decide_adaptive, promote_forced
 
@@ -112,6 +113,65 @@ def test_decide_adaptive_and_forced_respect_scale():
 
 
 # ── dashboard surfacing ──────────────────────────────────────────────────────
+# ── phase 2: behavioral anchoring ────────────────────────────────────────────
+def _seed_calls(db, pairs):
+    with connect(db) as conn:
+        db_upsert(conn, "duel_decisions",
+                  [{"pair": p, "decision_date": "2026-07-21", "side": "X",
+                    "size_factor": 1.0, "captured_at": "x"} for p in pairs],
+                  immutable=("captured_at",))
+
+
+def test_record_adherence_computes_vs_recommended(tmp_path, monkeypatch):
+    db = tmp_path / "adh.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    _seed_calls(db, ["soxl_soxs"])
+    # size_factor 1.0 × duel_size_pct → recommended; deploy 2× that
+    r = D.record_adherence("2026-07-21", "soxl_soxs",
+                           2 * settings.duel_size_pct)
+    assert r["recommended_pct"] == settings.duel_size_pct
+    assert r["adherence"] == 2.0
+
+
+def test_behavioral_none_below_min_n(tmp_path, monkeypatch):
+    db = tmp_path / "b.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_discipline_min_n", 3)
+    _seed_calls(db, ["a", "b"])
+    D.record_adherence("2026-07-21", "a", settings.duel_size_pct)
+    D.record_adherence("2026-07-21", "b", settings.duel_size_pct)
+    assert D.behavioral_factor() is None            # 2 < 3 samples
+
+
+def test_behavioral_override_penalises_oversizing(tmp_path, monkeypatch):
+    db = tmp_path / "o.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_discipline_min_n", 3)
+    _seed_calls(db, ["a", "b", "c"])
+    D.record([3, 3, 3, 3, 3])                       # self-report: fully disciplined
+    assert D.active_factor() == 1.0
+    for p in ("a", "b", "c"):                       # but actually over-sizes 2×
+        D.record_adherence("2026-07-21", p, 2 * settings.duel_size_pct)
+    b = D.behavioral_factor()
+    assert b["n"] == 3 and b["factor"] == 0.5        # 1 / mean_adherence(2.0)
+    assert D.active_factor() == 0.5                  # behavioral overrides self
+    assert D.summary()["source"] == "behavioral"
+
+
+def test_behavioral_does_not_penalise_undersizing(tmp_path, monkeypatch):
+    db = tmp_path / "u.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_discipline_min_n", 2)
+    _seed_calls(db, ["a", "b"])
+    for p in ("a", "b"):                             # deploys HALF the recommendation
+        D.record_adherence("2026-07-21", p, 0.5 * settings.duel_size_pct)
+    assert D.behavioral_factor()["factor"] == 1.0    # under-sizing is not punished
+
+
 def _embedded_data(html):
     """Pull the window.DATA payload the page renders client-side."""
     frag = html.split("window.DATA = ", 1)[1].split("\n", 1)[0].rstrip(";")
