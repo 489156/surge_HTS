@@ -646,6 +646,26 @@ def _cmd_discipline(args) -> int:
     return 0
 
 
+def _cmd_duel_calibsearch(args) -> int:
+    from .duel import calibsearch
+
+    res = calibsearch.search(max_groups=args.max_groups)
+    print("\n  ── 확신 판별 부분집합 탐색 (OOS conviction→correct AUC) ──")
+    print("  (선택=훈련 70%, 검증=홀드아웃 30% · 0.50=판별 없음/확신은 노이즈)")
+    print(f"  {'조합':30}{'AUC훈련':>8}{'AUC검증':>8}{'n검증':>7}{'적중':>7}")
+    for r in res["rows"][: args.limit]:
+        print(f"  {r['combo']:30}{r['auc_train']:8.3f}{r['auc_hold']:8.3f}"
+              f"{r['n_hold']:7}{r['acc']*100:6.1f}%")
+    b = res["base"]
+    if b:
+        print(f"  {'[BASE 인컴번트]':30}{b['auc_train']:8.3f}{b['auc_hold']:8.3f}"
+              f"{b['n_hold']:7}{b['acc']*100:6.1f}%")
+    print(f"\n  홀드아웃 AUC 분포: min {res['hold_min']:.3f} · "
+          f"median {res['hold_median']:.3f} · max {res['hold_max']:.3f}")
+    print(f"  🧩 {res['verdict']}\n")
+    return 0
+
+
 def _cmd_duel_gap(args) -> int:
     from .duel import gapanalysis
 
@@ -1481,6 +1501,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--log", nargs=3, metavar=("DATE", "PAIR", "ACTUAL_PCT"),
                     help="실행 사이즈 기록(행동 앵커링): 콜의 권장 대비 실제 비중")
     sp.set_defaults(func=_cmd_discipline)
+
+    sp = sub.add_parser("duel-calibsearch",
+                        help="확신이 적중을 판별하는 피처 부분집합 탐색(OOS AUC, 진단)")
+    sp.add_argument("--max-groups", type=int, default=2,
+                    help="DESK 그룹 조합 최대 크기 (기본 2)")
+    sp.add_argument("--limit", type=int, default=14, help="표시 행 수")
+    sp.set_defaults(func=_cmd_duel_calibsearch)
 
     sp = sub.add_parser("duel-gap",
                         help="why predictions diverged from verification")
