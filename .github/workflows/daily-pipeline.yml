@@ -40,17 +40,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore the SQLite archive from the data branch
-        # The 84MB archive lives on the orphan `data` branch, NOT main (main is
-        # code only). Pull it in; verify it opens with schema, else discard so
-        # `surge init` recreates it (bootstrap). A missing/invalid restore is
-        # caught by the persist step's shrink guard, which refuses to overwrite
-        # the branch with a smaller DB — so a bad restore FAILS the run instead
-        # of destroying the accumulated archive.
+        # The archive lives GZIPPED on the orphan `data` branch as surge.db.gz,
+        # NOT main (main is code only). GitHub hard-rejects any single file
+        # >100MB on push, and the raw DB crossed that on 2026-08-05 — gzip
+        # (~3x) keeps the pushed blob well under the limit. Pull + gunzip;
+        # verify it opens with schema, else discard so `surge init` recreates it
+        # (bootstrap). A bad restore is caught by the persist shrink guard.
         run: |
           mkdir -p data
           if git fetch --depth=1 origin data 2>/dev/null; then
-            git cat-file -p origin/data:surge.db > data/surge.db \
-              && echo "restored $(stat -c%s data/surge.db) bytes from data branch"
+            if git cat-file -e origin/data:surge.db.gz 2>/dev/null; then
+              git cat-file -p origin/data:surge.db.gz | gunzip > data/surge.db \
+                && echo "restored (gz) $(stat -c%s data/surge.db) bytes"
+            elif git cat-file -e origin/data:surge.db 2>/dev/null; then   # legacy uncompressed
+              git cat-file -p origin/data:surge.db > data/surge.db \
+                && echo "restored (plain) $(stat -c%s data/surge.db) bytes"
+            fi
           else
             echo "no data branch yet — bootstrap fresh"
           fi
@@ -87,28 +92,29 @@ jobs:
           surge daily            # score → evolve → judge → record (learning_log)
           exit 0
 
-      - name: Persist the archive to the data branch (fail-safe, never shrinks)
-        # Single-commit orphan snapshot, force-pushed to `data`. Shrink guard:
-        # never overwrite the branch with a DB < 90% of what's already there —
-        # a truncated run or failed restore fails the job VISIBLY instead of
-        # clobbering the accumulated archive. Plumbing (hash-object/mktree/
-        # commit-tree) keeps the branch a single commit (no history bloat).
+      - name: Persist the archive to the data branch (gzipped, fail-safe)
+        # Single-commit orphan snapshot of surge.db.GZ, force-pushed to `data`.
+        # gzip keeps it under GitHub's 100MB per-file push limit (raw DB is
+        # ~100MB → ~35MB gz). Shrink guard on the COMPRESSED size: never
+        # overwrite with a blob < 90% of what's there — a truncated run fails
+        # VISIBLY instead of clobbering the archive. Plumbing keeps one commit.
         run: |
           git config user.name  "surge-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           test -s data/surge.db || { echo "::error::no surge.db to persist"; exit 1; }
-          new=$(stat -c%s data/surge.db)
+          gzip -c data/surge.db > data/surge.db.gz
+          new=$(stat -c%s data/surge.db.gz)
           git fetch --depth=1 origin data 2>/dev/null || true
-          old=$(git cat-file -s origin/data:surge.db 2>/dev/null || echo 0)
+          old=$(git cat-file -s origin/data:surge.db.gz 2>/dev/null || echo 0)
           if [ "$old" -gt 0 ] && [ "$new" -lt "$((old * 90 / 100))" ]; then
             echo "::error::archive shrink guard: new ${new}B < 90% of existing ${old}B — refusing to persist"
             exit 1
           fi
-          blob=$(git hash-object -w data/surge.db)
-          tree=$(printf '100644 blob %s\tsurge.db\n' "$blob" | git mktree)
+          blob=$(git hash-object -w data/surge.db.gz)
+          tree=$(printf '100644 blob %s\tsurge.db.gz\n' "$blob" | git mktree)
           commit=$(git commit-tree "$tree" -m "chore(data): pipeline run $(date -u +'%Y-%m-%dT%H:%MZ')")
           git push --force origin "$commit:refs/heads/data"
-          echo "persisted ${new}B to data branch (was ${old}B)"
+          echo "persisted ${new}B gz to data branch (was ${old}B)"
 
   # PHASE 2 (wired 2026-07-09): publish tonight's calls + verification ledgers as a
   # static read-only page, so the daily results are viewable from any phone at the
@@ -126,14 +132,18 @@ jobs:
           ref: main            # code only — the DB lives on the data branch
 
       - name: Restore the SQLite archive from the data branch
-        # the pipeline job persisted the fresh DB to `data`; pull it in so the
-        # exported page reflects tonight's run. Degrade-safe: no branch → empty
-        # page (never crashes).
+        # the pipeline job persisted the fresh gzipped DB to `data`; pull +
+        # gunzip so the exported page reflects tonight's run. Degrade-safe: no
+        # branch → empty page (never crashes).
         run: |
           mkdir -p data
           if git fetch --depth=1 origin data 2>/dev/null; then
-            git cat-file -p origin/data:surge.db > data/surge.db \
-              && echo "restored $(stat -c%s data/surge.db) bytes for export"
+            if git cat-file -e origin/data:surge.db.gz 2>/dev/null; then
+              git cat-file -p origin/data:surge.db.gz | gunzip > data/surge.db \
+                && echo "restored (gz) $(stat -c%s data/surge.db) bytes for export"
+            elif git cat-file -e origin/data:surge.db 2>/dev/null; then
+              git cat-file -p origin/data:surge.db > data/surge.db
+            fi
           else
             echo "no data branch — exporting empty page"
           fi

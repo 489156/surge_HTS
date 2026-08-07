@@ -12,10 +12,18 @@ off the code history.
 
 - **`main` is code only.** `data/` is git-ignored; `data/surge.db` is no longer
   tracked.
-- **The `data` branch holds exactly one file, `surge.db`, as a single orphan
-  commit** (no history — the DB is a full snapshot each time, and the archive's
-  real history lives *inside* the immutable rows). Each pipeline run force-pushes
-  a fresh single-commit snapshot, so the branch never grows.
+- **The `data` branch holds exactly one file, `surge.db.gz` (gzipped), as a
+  single orphan commit** (no history — the DB is a full snapshot each time, and
+  the archive's real history lives *inside* the immutable rows). Each pipeline
+  run force-pushes a fresh single-commit snapshot, so the branch never grows.
+- **Why gzipped (2026-08-07 fix):** GitHub hard-rejects any single file >100MB
+  on push (any branch — this would have broken the old commit-to-main approach
+  identically). The raw DB crossed 100MB on 2026-08-05 and every pipeline
+  persist was rejected → the archive froze at 08-05. gzip (~3×: ~100MB → ~35MB)
+  puts it well under the limit with years of runway. Restore gunzips; a legacy
+  uncompressed `surge.db` is still read as a fallback for the cutover run.
+  (If it ever approaches the limit again: `VACUUM`, prune the no-edge surge
+  screener's daily_snapshot/trap_flags, or move to a Release asset.)
 - **The pipeline restores it at job start** (`git fetch origin data` →
   `git cat-file -p origin/data:surge.db > data/surge.db`), runs, then **persists
   it back** via `hash-object` / `mktree` / `commit-tree` + `git push --force`.
