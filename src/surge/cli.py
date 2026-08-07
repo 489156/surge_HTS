@@ -646,6 +646,31 @@ def _cmd_discipline(args) -> int:
     return 0
 
 
+def _cmd_duel_benchmark(_args) -> int:
+    from .duel import benchmark
+
+    lb = benchmark.long_bias_comparison()
+    print("\n  ── 방향 모델 vs 단순 벤치마크 (같은 채점 세션) ──")
+    if lb:
+        print(f"  {lb['headline']}")
+        print(f"    champion {lb['champion_acc']*100:.1f}% · 무조건롱 "
+              f"{lb['always_long_acc']*100:.1f}% · 무조건숏 "
+              f"{lb['always_short_acc']*100:.1f}%  (n={lb['n']})")
+        print(f"    → 방향 모델이 무조건-롱을 이기는가: "
+              f"{'예 ✅' if lb['beats_long'] else '아직 아님 (유의미한 우위 없음)'}")
+    else:
+        print("  (채점된 방향성 콜 없음)")
+    rg = benchmark.regime_accuracy()
+    print(f"\n  ── 변동성 레짐별 적중률 (연율 σ: <{rg['lo']:.0%} / "
+          f"{rg['lo']:.0%}–{rg['hi']:.0%} / ≥{rg['hi']:.0%}) ──")
+    for k, lab in (("low", "저변동성"), ("mid", "중변동성"), ("high", "고변동성")):
+        b = rg["buckets"][k]
+        acc = f"{b['acc']*100:.1f}%" if b["acc"] is not None else "—"
+        print(f"    {lab:8} n={b['n']:3}  적중 {acc}")
+    print("  ※ 고변동성이 동전이면 그 레짐 관망이 정답 — 전방 축적으로 검증.\n")
+    return 0
+
+
 def _cmd_duel_calibsearch(args) -> int:
     from .duel import calibsearch
 
@@ -1501,6 +1526,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--log", nargs=3, metavar=("DATE", "PAIR", "ACTUAL_PCT"),
                     help="실행 사이즈 기록(행동 앵커링): 콜의 권장 대비 실제 비중")
     sp.set_defaults(func=_cmd_discipline)
+
+    sub.add_parser("duel-benchmark",
+                   help="방향 모델 vs 무조건-롱/숏 + 변동성 레짐별 적중률(정직 벤치마크)"
+                   ).set_defaults(func=_cmd_duel_benchmark)
 
     sp = sub.add_parser("duel-calibsearch",
                         help="확신이 적중을 판별하는 피처 부분집합 탐색(OOS AUC, 진단)")
