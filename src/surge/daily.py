@@ -239,6 +239,13 @@ def run_daily(write: bool = True) -> dict:
             return archive_integrity(conn)
     quality_status = _safe("quality", _quality, warnings) or {}
 
+    # ── 2.11 BENCHMARK — is the direction model worth it? champion vs
+    # always-long/short + hit rate by vol regime (surge/duel/benchmark.py). ──
+    def _benchmark() -> dict:
+        from .duel.benchmark import summary as bsummary
+        return bsummary()
+    benchmark_status = _safe("benchmark", _benchmark, warnings) or {}
+
     # ── 3. JUDGE — current evidence per strategy (the truth gate) ──
     strategies = _safe("verdict", V.assess, warnings) or []
     headline = _safe("headline", V.headline, warnings) or "—"
@@ -283,6 +290,7 @@ def run_daily(write: bool = True) -> dict:
         "verify": verify_status,          # 빠른 확신 검증 (교차풀링 + 프라이어워밍)
         "provenance": _safe("provenance", _provenance, warnings) or {},
         "quality": quality_status,        # 아카이브 무결성 (비양수·stale 피드)
+        "benchmark": benchmark_status,    # 방향모델 vs 무조건롱/숏 + 레짐별 적중률
         "volstate": volstate_status,      # 선행 변동성 레짐 (기간구조·SKEW·σ5/σ20)
         "discipline": discipline_status,  # 투자행동 리스크 규율 자가진단 → 사이징 감쇠
         "blindspot": blindspot,           # 관망 원인 진단 + 사각지대 fill 레이스
