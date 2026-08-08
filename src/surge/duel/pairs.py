@@ -62,10 +62,21 @@ PAIRS: dict[str, dict] = {
     "nvdl_nvd": {
         "id": "nvdl_nvd", "bull": "NVDL", "bear": "NVD",
         "underlying": "NVDA", "name": "엔비디아 2x (단일종목 예외)",
+        # DEACTIVATED 2026-08-07: worst live pair — 45.5% hit, −0.99%/bet
+        # (below coin, losing). Kept in the registry so its history/archive
+        # survive and it can be re-activated if a forward case emerges; just no
+        # new live calls. `active_pair_ids()` (used by `duel --pair all`) skips it.
+        "active": False,
     },
 }
 
 DEFAULT_PAIR = "soxl_soxs"
+
+
+def active_pair_ids() -> list[str]:
+    """Pair ids that generate live calls — everything except those flagged
+    `active: False` (deactivated losers kept only for history)."""
+    return [pid for pid, p in PAIRS.items() if p.get("active", True)]
 
 
 def get_pair(pair_id: str) -> dict:

@@ -90,6 +90,8 @@ jobs:
                                    # (검색급등/policy_tagged가 +10%/T+5를 선별하는가;
                                    # 로컬 루틴 은퇴 후 파이프라인이 유일 갱신자)
           surge daily            # score → evolve → judge → record (learning_log)
+          surge prune            # trim no-edge surge-screener archive + VACUUM
+                                 # (caps DB growth that hit the 100MB push wall)
           exit 0
 
       - name: Persist the archive to the data branch (gzipped, fail-safe)

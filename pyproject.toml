@@ -49,5 +49,12 @@ packages = ["src/surge"]
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.lint]
+# Version-stable CI gate: the classic pyflakes + pycodestyle-critical set — real
+# bugs (undefined names, unused imports, syntax, bad comparisons), no stylistic
+# noise. Keeps `ruff check` deterministic + green across ruff versions. Widen
+# deliberately later if desired.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
