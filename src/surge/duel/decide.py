@@ -101,6 +101,31 @@ def _scaled_pct(sf: float, size_scale: float, size_ceiling: float | None) -> flo
     return round(pct, 4)
 
 
+def _long_tilt(score: float, conviction: float) -> tuple[float, float]:
+    """A3: nudge the score by a structural long (bull) bias. Off (0) by default
+    → identity. Conviction re-derives from the tilted score so bands stay
+    consistent. Bounded to keep it a prior, not a fabricated strong signal."""
+    t = settings.duel_long_tilt
+    if not t:
+        return score, conviction
+    s = max(-1.0, min(1.0, score + t))
+    return s, abs(s)
+
+
+def _regime_abstain(ctx: dict) -> str | None:
+    """A2: abstain reason when annualized realized σ20 ≥ the regime threshold
+    (high-vol = coin per the archive probe), or None. Off (0) by default."""
+    thr = settings.duel_regime_abstain_annual
+    v20 = ctx.get("und_vol20")
+    if thr <= 0 or not v20:
+        return None
+    annual = float(v20) * math.sqrt(252)
+    if annual >= thr:
+        return (f"레짐 게이트: 연율 실현변동성 {annual:.0%} ≥ {thr:.0%} "
+                "(고변동성=동전, 관망이 +EV)")
+    return None
+
+
 def _brackets(ctx: dict, side: str,
               entry_ref: dict[str, float] | None) -> tuple:
     atr = (ctx.get("atr_pct") or {}).get(side)
@@ -120,7 +145,7 @@ def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
     `size_scale`/`size_ceiling`: per-user risk-discipline shrink + life-share
     cap, injected by the live layer (decide stays a pure, DB-free function)."""
     sig = compute_signal(ctx, mult)
-    score, conviction = sig["score"], sig["conviction"]
+    score, conviction = _long_tilt(sig["score"], sig["conviction"])   # A3 (off=identity)
     comps = sig["components"]
     date = ctx["date"]
     pair = ctx.get("pair") or {"id": "soxl_soxs", "bull": "SOXL", "bear": "SOXS"}
@@ -134,6 +159,15 @@ def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
                             components=comps,
                             abstain_reason=f"VIX {vix:.0f} ≥ {settings.duel_crisis_vix:g}"
                                            " (위기 변동성 — 3배 레버리지 베팅 금지)")
+
+    regime = _regime_abstain(ctx)                     # A2 high-vol gate (off by default)
+    if regime is not None:
+        aside_side = pair["bull"] if score > 0 else pair["bear"]
+        ref, stop, target, atr = _brackets(ctx, aside_side, entry_ref)
+        return DuelDecision(date=date, pair_id=pid, side="STAND_ASIDE", score=score,
+                            conviction=conviction, size_factor=0.0, size_pct=0.0,
+                            entry_ref=ref, stop_price=stop, target_price=target,
+                            atr_pct=atr, components=comps, abstain_reason=regime)
 
     sf = _size_factor(conviction)
     if sf == 0.0:
@@ -206,6 +240,16 @@ def decide_adaptive(ctx: dict, prob_up: float,
                             abstain_reason=f"VIX {vix:.0f} ≥ "
                                            f"{settings.duel_crisis_vix:g}"
                                            " (위기 변동성 — 3배 레버리지 베팅 금지)")
+
+    regime = _regime_abstain(ctx)                     # A2 high-vol gate (off by default)
+    if regime is not None:
+        aside_side = pair["bull"] if score > 0 else pair["bear"]
+        ref, stop, target, atr = _brackets(ctx, aside_side, entry_ref)
+        return DuelDecision(date=date, pair_id=pid, side="STAND_ASIDE",
+                            score=score, conviction=conviction, size_factor=0.0,
+                            size_pct=0.0, entry_ref=ref, stop_price=stop,
+                            target_price=target, atr_pct=atr, components=comps,
+                            model="adaptive", abstain_reason=regime)
 
     if conviction < settings.duel_adaptive_band:
         aside_side = pair["bull"] if score > 0 else pair["bear"]

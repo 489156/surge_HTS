@@ -139,6 +139,19 @@ class Settings(BaseSettings):
     # directional edge to overfit. 0 disables. Silent on nights lacking the vol-
     # curve fetch (degrade-safe: fewer sub-signals, never a false alarm).
     duel_volstate_dampen: float = 0.60
+    # A2 regime gate — abstain when the underlying's ANNUALIZED realized σ20 is
+    # at/above this (the archive probe found the champion is a coin in high-vol
+    # regimes, z=3.78; abstaining there is pure risk reduction — you give up no
+    # edge). DEFAULT 0 = OFF: the live regime record so far is thin and even
+    # contradicts the archive (high-vol 60% n=15), so enabling this is gated on
+    # the forward `surge duel-benchmark` regime read, not the in-sample probe.
+    duel_regime_abstain_annual: float = 0.0
+    # A3 long tilt — additive long (bull) bias on the score. Over 25y the
+    # champion doesn't beat always-long (50.6% vs 51.5%), so a structural long
+    # prior may help. DEFAULT 0 = OFF: on the LIVE record the champion currently
+    # BEATS always-long (61% vs 53%), so a tilt would hurt now — enable only if
+    # `duel-benchmark` shows the model stops beating buy-the-bull.
+    duel_long_tilt: float = 0.0
     # Investor risk-discipline dampener (duel/discipline.py) — a per-USER sizing
     # shrink from a behavior self-diagnosis. Worst-discipline floor: an
     # undisciplined self-report caps size at this fraction; fully disciplined =
