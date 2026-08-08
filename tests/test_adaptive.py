@@ -232,6 +232,8 @@ def test_eval_outcomes_marks_gap_guard(tmp_path, monkeypatch):
 
     frames = _frames(n=120, lead=+1, gap=0.01)   # opens gap INTO the up call
     last = frames["SOXX"]["date"].iloc[-1]
+    # live-network doors (quotes/earnings/options/basket) are closed suite-wide
+    # by the autouse guard in tests/conftest.py — this stays fully offline.
     d = dlive.tonight(frames=frames, with_futures=False, session_date=last)
     assert d.side == "SOXL" and d.gap_guard is not None
 
