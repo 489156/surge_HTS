@@ -263,3 +263,28 @@ def test_render_html_escapes_script_close():
     html = export.render_html(data)
     assert "</script><script>alert" not in html   # broken out of the payload
     assert "<\\/script>" in html                  # escaped form present
+
+
+def test_staleness_flags_old_calls(tmp_path, monkeypatch):
+    import datetime as dt
+
+    db = tmp_path / "stale.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    with connect(db) as conn:
+        db_upsert(conn, "duel_decisions", [
+            {"pair": "soxl_soxs", "decision_date": "2020-01-02", "side": "SOXL",
+             "score": 0.3, "conviction": 0.3, "model": "champion",
+             "captured_at": "x"}], immutable=("captured_at",))
+    s = export._staleness()
+    assert s["stale"] is True and s["days"] > 4
+    html = export.render_html(export.collect())
+    assert "파이프라인 정체 의심" in html          # banner text present in template
+
+    # a call dated today is NOT stale
+    with connect(db) as conn:
+        db_upsert(conn, "duel_decisions", [
+            {"pair": "tqqq_sqqq", "decision_date": dt.date.today().isoformat(),
+             "side": "TQQQ", "score": 0.3, "conviction": 0.3,
+             "model": "champion", "captured_at": "x"}], immutable=("captured_at",))
+    assert export._staleness()["stale"] is False

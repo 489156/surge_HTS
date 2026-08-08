@@ -230,10 +230,28 @@ def _discipline() -> dict:
     return s
 
 
+def _staleness() -> dict:
+    """Days between the newest call and now — surfaces a silently-stalled
+    pipeline (the 2-day outage the user had to notice manually). >4 calendar
+    days (weekend-tolerant: Fri→Tue is 4) flags stale."""
+    import datetime as _dt
+
+    d = _calls().get("date")
+    if not d:
+        return {"stale": True, "days": None, "last": None}
+    try:
+        last = _dt.date.fromisoformat(d)
+        days = (_dt.datetime.now(_dt.timezone.utc).date() - last).days
+    except (ValueError, TypeError):
+        return {}
+    return {"stale": days > 4, "days": days, "last": d}
+
+
 def collect() -> dict:
     """Everything the public page shows. Read-only; per-section degrade-safe."""
     return {
         "generated_at": utc_now(),
+        "stale": _safe(_staleness, {}),
         "calls": _safe(_calls, {"date": None, "cards": []}),
         "previous": _safe(_previous_results, {"date": None, "cards": []}),
         "tally": _safe(_tally, {}),
@@ -361,8 +379,15 @@ const calls=D.calls||{}, cards=calls.cards||[], fam=(D.verify||{}).family||{};
 const nDir=cards.filter(c=>c.side&&c.side!=='STAND_ASIDE').length;
 const famBadge=fam.verified?'<span class="badge ok">엔진 검증 ✅</span>'
   :`<span class="badge">검증 축적중 e=${num(fam.e_pooled,2)}/${num(fam.threshold,0)}</span>`;
-html+=`<h1>surge 야간 방향 콜<small>${esc(calls.date||'—')} 미국 세션</small></h1>
-<div class="summary">
+html+=`<h1>surge 야간 방향 콜<small>${esc(calls.date||'—')} 미국 세션</small></h1>`;
+const stale=D.stale||{};
+if(stale.stale){
+  const ago=stale.days!=null?`마지막 콜 ${esc(stale.last||'—')} (${stale.days}일 전)`:'콜 없음';
+  html+=`<div style="background:var(--bull-bg);color:var(--bull);border:1px solid var(--bull);
+    border-radius:10px;padding:10px 14px;margin:10px 0;font-weight:600">
+    ⚠ 파이프라인 정체 의심 — ${ago}. 야간 실행이 멈췄을 수 있습니다 (Actions 확인).</div>`;
+}
+html+=`<div class="summary">
   <span class="badge">${cards.length}페어 판정</span>
   <span class="badge">${nDir}건 방향 콜 · ${cards.length-nDir}건 관망</span>
   ${famBadge}

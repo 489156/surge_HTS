@@ -11,7 +11,8 @@ def _seed(db, rows):
 
 
 def test_long_bias_champion_beats_long(tmp_path, monkeypatch):
-    db = tmp_path / "b.db"; init_db(db)
+    db = tmp_path / "b.db"
+    init_db(db)
     monkeypatch.setattr(settings, "db_path", db)
     # 4 sessions: champion right on all; underlying down on 3 (always-long wrong on 3)
     _seed(db, [
@@ -25,7 +26,8 @@ def test_long_bias_champion_beats_long(tmp_path, monkeypatch):
 
 
 def test_long_bias_empty(tmp_path, monkeypatch):
-    db = tmp_path / "e.db"; init_db(db)
+    db = tmp_path / "e.db"
+    init_db(db)
     monkeypatch.setattr(settings, "db_path", db)
     assert benchmark.long_bias_comparison() == {}
     assert benchmark.summary()["long_bias"] == {}      # degrade-safe
@@ -33,7 +35,8 @@ def test_long_bias_empty(tmp_path, monkeypatch):
 
 def test_regime_buckets(tmp_path, monkeypatch):
     import json
-    db = tmp_path / "r.db"; init_db(db)
+    db = tmp_path / "r.db"
+    init_db(db)
     monkeypatch.setattr(settings, "db_path", db)
     with connect(db) as conn:
         db_upsert(conn, "duel_decisions", [

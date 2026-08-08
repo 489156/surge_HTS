@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Label definition
     surge_threshold_pct: float = 100.0     # +100% = the target event
     near_surge_pct: float = 30.0           # "near miss" — kept for richer training
+    # Archive prune (surge/prune.py): keep only this many days of the no-edge
+    # surge-screener tables (daily_snapshot/trap_flags/… ≈ 4,800 rows/session,
+    # verdict ⛔) and VACUUM. Caps DB growth that hit GitHub's 100MB push wall.
+    # 0 disables. Never touches price_history or duel/rotation/adaptive data.
+    surge_prune_keep_days: int = 60
 
     # Trap thresholds
     exhausted_lookback_days: int = 10

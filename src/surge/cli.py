@@ -381,9 +381,9 @@ def _print_duel_card(d, pair: dict) -> None:
 def _cmd_duel(args) -> int:
     from .duel import data as duel_data
     from .duel import live as duel_live
-    from .duel.pairs import PAIRS, get_pair
+    from .duel.pairs import PAIRS, active_pair_ids, get_pair
 
-    pair_ids = list(PAIRS) if args.pair == "all" else [args.pair]
+    pair_ids = active_pair_ids() if args.pair == "all" else [args.pair]
     unknown = [p for p in pair_ids if p not in PAIRS]
     if unknown:
         print(f"  알 수 없는 페어: {unknown} — 선택지: {', '.join(PAIRS)} 또는 all")
@@ -522,10 +522,10 @@ def _cmd_report(_args) -> int:
 
 def _cmd_factors(args) -> int:
     from .duel import factors
-    from .duel.pairs import PAIRS
+    from .duel.pairs import active_pair_ids
 
     if getattr(args, "backfill", False):
-        pairs = list(PAIRS) if args.pair == "all" else [args.pair]
+        pairs = active_pair_ids() if args.pair == "all" else [args.pair]
         total = 0
         for pid in pairs:
             n = factors.backfill(period=args.period, pair_id=pid)
@@ -643,6 +643,20 @@ def _cmd_discipline(args) -> int:
         curve = " → ".join(f"{t['factor']:.2f}" for t in traj[-8:])
         print(f"  규율 궤적(성장추적): {curve}")
     print("  ※ 감쇠는 사이즈만 줄인다 — 확신·방향 불변. 투자자문 아님.\n")
+    return 0
+
+
+def _cmd_prune(args) -> int:
+    from .prune import prune_surge_screener
+
+    res = prune_surge_screener(keep_days=args.keep_days)
+    if res.get("skipped"):
+        print(f"  prune 비활성 ({res.get('reason')})")
+        return 0
+    print(f"\n  ── 아카이브 prune (무-엣지 surge 스크리너, cutoff {res['cutoff']}) ──")
+    for t, n in res["deleted"].items():
+        print(f"    {t:22} 삭제 {n:>8}행")
+    print(f"    합계 {res['total']}행 삭제 · VACUUM {'완료' if res['vacuumed'] else '생략'}\n")
     return 0
 
 
@@ -786,9 +800,9 @@ def _cmd_duel_archive(args) -> int:
 
 def _cmd_duel_backtest(args) -> int:
     from .duel import backtest as duel_bt
-    from .duel.pairs import PAIRS
+    from .duel.pairs import active_pair_ids
 
-    pair_ids = list(PAIRS) if args.pair == "all" else [args.pair]
+    pair_ids = active_pair_ids() if args.pair == "all" else [args.pair]
     rc = 0
     for pid in pair_ids:
         rc = max(rc, (_duel_compare_one if args.compare
@@ -866,9 +880,9 @@ def _cmd_adaptive(args) -> int:
     그리고 '모델이 어떻게 배워야 하는가'(설정 레이스)의 전진/리플레이 성적."""
     from .db import connect
     from .duel import adaptive
-    from .duel.pairs import PAIRS
+    from .duel.pairs import PAIRS, active_pair_ids
 
-    pair_ids = list(PAIRS) if args.pair == "all" else [args.pair]
+    pair_ids = active_pair_ids() if args.pair == "all" else [args.pair]
     unknown = [p for p in pair_ids if p not in PAIRS]
     if unknown:
         print(f"  알 수 없는 페어: {unknown} — 선택지: {', '.join(PAIRS)} 또는 all")
@@ -1526,6 +1540,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--log", nargs=3, metavar=("DATE", "PAIR", "ACTUAL_PCT"),
                     help="실행 사이즈 기록(행동 앵커링): 콜의 권장 대비 실제 비중")
     sp.set_defaults(func=_cmd_discipline)
+
+    sp = sub.add_parser("prune",
+                        help="무-엣지 surge 스크리너 아카이브 정리 + VACUUM (DB 경량화)")
+    sp.add_argument("--keep-days", type=int, default=None,
+                    help="유지 일수 (기본 surge_prune_keep_days=60)")
+    sp.set_defaults(func=_cmd_prune)
 
     sub.add_parser("duel-benchmark",
                    help="방향 모델 vs 무조건-롱/숏 + 변동성 레짐별 적중률(정직 벤치마크)"
