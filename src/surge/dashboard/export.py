@@ -275,23 +275,38 @@ def export_site(outdir: str = "site") -> dict:
     """Write index.html (self-contained) + data.json into `outdir`."""
     import pathlib
 
+    from . import pwa
+
     out = pathlib.Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     data = collect()
     (out / "data.json").write_text(
         json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "index.html").write_text(render_html(data), encoding="utf-8")
+    # installable/offline PWA sidecar (manifest, service worker, icons) — makes
+    # the read-only page a real app surface for the Capacitor wrapper.
+    pwa_files = _safe(lambda: pwa.write_pwa_assets(out), [])
     n_cards = len(data["calls"]["cards"])
     return {"outdir": str(out), "date": data["calls"]["date"],
-            "cards": n_cards}
+            "cards": n_cards, "pwa": pwa_files}
 
 
 _TEMPLATE = r"""<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>surge — 야간 방향 콜</title>
+<meta name="description" content="미국 야간 세션 방향 예측의 사후 검증 기록 — 참고·교육용, 투자자문 아님.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#2E7D6B">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="surge">
 <style>
 :root{
   --bg:#F4F6F3; --card:#FDFEFD; --ink:#1C2422; --sub:#5C6A66; --line:#DCE3DF;
@@ -361,9 +376,51 @@ th{color:var(--sub);font-weight:600;font-size:.76rem}
 .wlabel{display:flex;justify-content:space-between;font-size:.8rem;color:var(--sub)}
 .foot{font-size:.75rem;color:var(--sub);line-height:1.6}
 .klabel{font-size:.78rem;color:var(--sub)}
+/* first-run disclaimer gate (regulatory + store safety) */
+#dg{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
+  background:rgba(8,12,16,.62);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);padding:18px}
+#dg[hidden]{display:none}
+.dg-card{background:var(--card);border:1px solid var(--line);border-radius:14px;max-width:440px;width:100%;
+  padding:22px 22px 20px;box-shadow:0 20px 60px -20px rgba(0,0,0,.55)}
+.dg-card h2{font-size:1.15rem;margin:0 0 10px;color:var(--ink);text-transform:none;letter-spacing:-.01em}
+.dg-lead{font-size:.92rem;color:var(--ink);margin:0 0 12px;line-height:1.6}
+.dg-list{margin:0 0 18px;padding-left:18px;font-size:.86rem;color:var(--sub);line-height:1.5}
+.dg-list li{margin:6px 0}
+.dg-list b,.dg-lead b{color:var(--ink)}
+#dg-ok{width:100%;padding:12px;border:0;border-radius:10px;background:var(--accent);color:var(--accent-ink);
+  font-size:.95rem;font-weight:700;cursor:pointer;font-family:inherit}
+#dg-ok:hover{filter:brightness(1.06)}
+#dg-ok:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 </style>
 </head>
 <body>
+<div id="dg" role="dialog" aria-modal="true" aria-labelledby="dg-title" hidden>
+  <div class="dg-card">
+    <h2 id="dg-title">시작하기 전에</h2>
+    <p class="dg-lead">이 앱은 <b>투자자문이나 매매 권유가 아닙니다.</b> 미국 야간 세션 방향 예측을 <b>사후에 검증·기록</b>하는 참고·교육용 도구입니다.</p>
+    <ul class="dg-list">
+      <li>예측 엔진의 <b>우위는 아직 검증되지 않았습니다</b> — 전진 기록·e-value를 그대로 공개합니다.</li>
+      <li><b>수익을 보장하지 않으며</b>, 과거 성과가 미래를 담보하지 않습니다.</li>
+      <li>3배 레버리지 상품은 <b>원금 전액 손실</b>이 가능합니다.</li>
+      <li>모든 투자 판단과 책임은 <b>이용자 본인</b>에게 있습니다.</li>
+    </ul>
+    <button id="dg-ok" type="button">이해했습니다 · 계속</button>
+  </div>
+</div>
+<script>
+(function(){
+  var K='surge_disclaimer_ack_v1', gate=document.getElementById('dg');
+  var ack=false; try{ack=localStorage.getItem(K)==='1';}catch(e){}
+  if(!ack){gate.hidden=false;document.documentElement.style.overflow='hidden';}
+  document.getElementById('dg-ok').addEventListener('click',function(){
+    try{localStorage.setItem(K,'1');}catch(e){}
+    gate.hidden=true;document.documentElement.style.overflow='';
+  });
+})();
+if('serviceWorker' in navigator){
+  addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});
+}
+</script>
 <main id="app"></main>
 <script>
 window.DATA = __DATA__;
