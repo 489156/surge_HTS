@@ -1,0 +1,14 @@
+{
+  "appId": "com.surgehts.app",
+  "appName": "surge",
+  "webDir": "www",
+  "backgroundColor": "#10151A",
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#10151A",
+    "limitsNavigationsToAppBoundDomains": true
+  },
+  "android": {
+    "backgroundColor": "#10151A"
+  }
+}
