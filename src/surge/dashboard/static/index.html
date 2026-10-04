@@ -237,6 +237,16 @@
       <div class="stat"><div class="k">Exposure</div><div class="v mono" id="exposure">—</div></div>
       <div class="stat"><div class="k">Positions</div><div class="v mono" id="npos">—</div></div>
     </div>
+    <div class="stats" style="margin:0 0 14px;border-top:1px dashed var(--line);padding-top:10px">
+      <div class="stat"><div class="k">Sharpe Ratio</div><div class="v mono" id="q-sharpe">—</div></div>
+      <div class="stat"><div class="k">Sortino Ratio</div><div class="v mono" id="q-sortino">—</div></div>
+      <div class="stat"><div class="k">Calmar Ratio</div><div class="v mono" id="q-calmar">—</div></div>
+      <div class="stat"><div class="k">Max Drawdown</div><div class="v mono" id="q-mdd">—</div></div>
+      <div class="stat"><div class="k">CVaR (95%)</div><div class="v mono" id="q-cvar">—</div></div>
+      <div class="stat"><div class="k">Omega Ratio</div><div class="v mono" id="q-omega">—</div></div>
+      <div class="stat"><div class="k">Win Rate</div><div class="v mono" id="q-winrate">—</div></div>
+      <div class="stat"><div class="k">AI Committee</div><div class="v mono" style="font-size:12px;color:var(--grn)">9 Agents Active</div></div>
+    </div>
 
     <div class="card span2">
       <h2>자산 곡선 · 기간 수익 (모의)</h2>
@@ -424,6 +434,16 @@ async function refresh(){
     $('#equity-chart').innerHTML=`<svg viewBox="0 0 ${ww} ${hh}" preserveAspectRatio="none" style="width:100%;height:80px"><path d="${dd}" fill="none" stroke="${up?'var(--grn)':'var(--red)'}" stroke-width="1.5"/></svg>`;
   }else $('#equity-chart').innerHTML='<span class="mut">데이터 부족 — 거래 사이클(Run cycle) 실행 후 누적</span>';
   $('#equity-note').innerHTML=`시작 $${fmt(eq.start_capital,0)} → 현재 $${fmt(eq.equity,0)} · 총수익 <b class="${cls(eq.total_return)}">${pct(eq.total_return)}</b> · ${eq.n} 스냅샷`;
+
+  // ── quant analytics (hedge fund risk metrics) ──
+  const qa=await j('/api/analytics');
+  $('#q-sharpe').innerHTML=qa.sharpe_ratio!=null?`<span class="${cls(qa.sharpe_ratio)}">${fmt(qa.sharpe_ratio,2)}</span>`:'—';
+  $('#q-sortino').innerHTML=qa.sortino_ratio!=null?`<span class="${cls(qa.sortino_ratio)}">${fmt(qa.sortino_ratio,2)}</span>`:'—';
+  $('#q-calmar').innerHTML=qa.calmar_ratio!=null?`<span class="${cls(qa.calmar_ratio)}">${fmt(qa.calmar_ratio,2)}</span>`:'—';
+  $('#q-mdd').innerHTML=qa.max_drawdown!=null?`<span class="neg">${(qa.max_drawdown*100).toFixed(1)}%</span>`:'—';
+  $('#q-cvar').innerHTML=qa.cvar_95!=null?`<span class="neg">${(qa.cvar_95*100).toFixed(1)}%</span>`:'—';
+  $('#q-omega').innerHTML=qa.omega_ratio!=null?`<span class="${cls(qa.omega_ratio-1)}">${fmt(qa.omega_ratio,2)}</span>`:'—';
+  $('#q-winrate').innerHTML=qa.win_rate!=null?`<span class="${cls(qa.win_rate-0.5)}">${(qa.win_rate*100).toFixed(0)}%</span>`:'—';
 
   // ── today's brief (one-glance synthesis; reuses already-fetched data, no new fetch) ──
   const brow=(l,html)=>`<div class="brow"><span class="blbl">${l}</span><span>${html}</span></div>`;

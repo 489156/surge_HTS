@@ -109,6 +109,18 @@ def data_integrity() -> dict:
         return {"status": "error", "error": str(exc)}
 
 
+@app.get("/api/analytics")
+def quant_analytics() -> dict:
+    """Institutional quant tear sheet: annualized Sharpe, Sortino, Calmar,
+    CVaR 95%, and Omega ratio based on live account equity trajectory."""
+    from ..trading.analytics import calculate_quant_tear_sheet
+
+    try:
+        return calculate_quant_tear_sheet(_mode())
+    except Exception as exc:  # noqa: BLE001
+        return {"has_data": False, "error": str(exc)}
+
+
 @app.get("/api/watchlist")
 def watchlist(limit: int = 25) -> list[dict]:
     with connect() as conn:

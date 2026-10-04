@@ -21,7 +21,8 @@ from loguru import logger
 from ..config import settings
 from ..db import connect
 from . import killswitch, store
-from .agents import DEFAULT_AGENTS, compute_macro_regime
+from .agents import Agent, DEFAULT_AGENTS, compute_macro_regime
+from .committee import COMMITTEE_AGENTS
 from .audit import audit
 from .brokers import default_last_price
 from .debate import run_debate
@@ -32,10 +33,11 @@ from .portfolio import PortfolioManager
 
 class TradingEngine:
     def __init__(self, mode: TradingMode | None = None,
-                 price_fn: Callable[[str], float | None] | None = None):
+                 price_fn: Callable[[str], float | None] | None = None,
+                 agents: list[Agent] | None = None):
         self.mode = mode or TradingMode(settings.trading_mode)
         self.price_fn = price_fn or default_last_price
-        self.agents = DEFAULT_AGENTS
+        self.agents = agents or (DEFAULT_AGENTS + COMMITTEE_AGENTS)
         self.pm = PortfolioManager()
         self.execution = ExecutionEngine(self.mode)
         self.risk = self.execution.risk
@@ -138,7 +140,7 @@ class TradingEngine:
                 continue
             ctx = self._ctx(symbol, macro, status)
             opinions = [a.evaluate(symbol, ctx) for a in self.agents]
-            debate = run_debate(opinions)
+            debate = run_debate(opinions, ctx=ctx)
             decision = self.pm.decide(symbol, opinions, debate, ref, self.mode)
             store.insert_decision(decision)
             store.insert_opinions(decision.decision_id, opinions)
