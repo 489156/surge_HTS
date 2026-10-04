@@ -88,6 +88,20 @@ class RiskEngine:
                 return RiskDecision(approved=False, status=status,
                                     reason="position cap leaves zero shares")
 
+        # 3.5) High-correlation cluster concentration cap (e.g. SOXL + TQQQ + TECL tech crowding)
+        HIGH_CORRELATION_CLUSTERS = {
+            "us_tech_beta": {"SOXL", "SOXS", "TQQQ", "SQQQ", "TECL", "TECS", "NVDL", "NVD"},
+            "us_financial": {"FAS", "FAZ"},
+            "us_smallcap": {"TNA", "TZA"},
+            "us_biotech": {"LABU", "LABD"},
+        }
+        for _cname, csyms in HIGH_CORRELATION_CLUSTERS.items():
+            if opening and symbol in csyms:
+                held_in_cluster = [p for p in positions if p.symbol in csyms and p.symbol != symbol]
+                if held_in_cluster:
+                    adjusted = max(1, int(math.floor(adjusted * 0.50)))
+                    break
+
         # 4) Portfolio at-risk cap.
         trade_risk = adjusted * abs(entry - stop)
         room = settings.max_portfolio_risk * equity - self.current_portfolio_risk(positions)

@@ -366,10 +366,16 @@ def eval_outcomes(frames: dict | None = None) -> dict:
                     entry = float(bar["open"]) * (1 + settings.duel_slippage_bps / 1e4)
                     stop = r["stop_price"] or entry * 0.97
                     target = r["target_price"] or entry * 1.05
+                    r_trig, r_px = None, None
+                    if settings.duel_ratchet_atr > 0 and r.get("atr_pct"):
+                        atr_val = entry * float(r["atr_pct"])
+                        r_trig = entry + settings.duel_ratchet_atr * atr_val
+                        r_px = entry  # break-even level
                     exit_px, reason = simulate_bracket(
                         entry, float(bar["high"]), float(bar["low"]),
                         float(bar["close"]), stop, target,
-                        settings.duel_slippage_bps)
+                        settings.duel_slippage_bps,
+                        ratchet_trigger=r_trig, ratchet_price=r_px)
                     updates.update(
                         entry_fill=entry, exit_fill=round(exit_px, 4),
                         exit_reason=reason,

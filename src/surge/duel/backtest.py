@@ -35,15 +35,27 @@ IC_COMPONENTS = ("asia_lead", "trend", "momentum_5d", "vix_regime",
 
 def simulate_bracket(o: float, h: float, lo: float, c: float,
                      stop: float, target: float, slip_bps: float = 20.0,
+                     ratchet_trigger: float | None = None,
+                     ratchet_price: float | None = None,
                      ) -> tuple[float, str]:
     """Long-leg bracket fill on one daily bar → (exit_price, reason).
     Conservative: if both stop and target are touched, assume the stop hit first.
-    A gap below the stop fills at the open (gap-through)."""
+    A gap below the stop fills at the open (gap-through).
+    If ratchet_trigger is reached (h >= ratchet_trigger), the stop is raised
+    to ratchet_price (default: entry price o) to lock in break-even."""
     slip = slip_bps / 1e4
     if o <= stop:                      # gapped through the stop
         return o * (1 - slip), "stop"
-    if lo <= stop:
-        return stop * (1 - slip), "stop"
+
+    effective_stop = stop
+    ratchet_active = False
+    if ratchet_trigger is not None and h >= ratchet_trigger:
+        effective_stop = max(stop, ratchet_price if ratchet_price is not None else o)
+        ratchet_active = True
+
+    if lo <= effective_stop:
+        reason = "ratchet_stop" if ratchet_active and effective_stop > stop else "stop"
+        return effective_stop * (1 - slip), reason
     if h >= target:
         return target * (1 - slip), "target"
     return c * (1 - slip), "close"

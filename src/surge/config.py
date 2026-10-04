@@ -171,8 +171,14 @@ class Settings(BaseSettings):
     # a 1σ same-direction gap would have blocked hit 59% with large positive
     # would-have PnL (gaps continue intraday more than they fade). The machinery
     # stays (duel-backtest --gap-guard Z measures it) but production won't act
-    # on a refuted hypothesis. Do NOT flip the sign in-sample either.
     duel_gap_guard_z: float = 0.0
+    # Break-even ratchet: when intraday gain reaches >= k·ATR, ratchet the stop
+    # to entry price (break-even) to protect profits against late-session whipsaws.
+    # 0 disables (static bracket).
+    duel_ratchet_atr: float = 0.75
+    # Gap-exhaustion ceiling in ATR units: if same-direction open gap exceeds
+    # k·ATR, avoid chasing the overextended open. 0 disables.
+    duel_max_gap_atr: float = 0.0
     # Adaptive (walk-forward learned weights; see duel/adaptive.py). Runs as a
     # SHADOW variant every night; flips the production path only when a human
     # sets SURGE_DUEL_USE_ADAPTIVE=1 after the forward record earns it.

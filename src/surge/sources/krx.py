@@ -80,6 +80,39 @@ def listing(market: str = "KRX") -> pd.DataFrame:
         return pd.DataFrame()
 
 
+_LISTING_CACHE: dict = {"ts": 0.0, "data": {}}
+
+
+def _listing_dict() -> dict[str, float]:
+    import time
+    now = time.time()
+    if _LISTING_CACHE["data"] and now - _LISTING_CACHE["ts"] < 300:
+        return _LISTING_CACHE["data"]
+    df = listing("KRX")
+    if df.empty or "Code" not in df.columns or "Close" not in df.columns:
+        return _LISTING_CACHE["data"]
+    d = dict(zip(df["Code"].astype(str), pd.to_numeric(df["Close"], errors="coerce")))
+    _LISTING_CACHE["ts"] = now
+    _LISTING_CACHE["data"] = d
+    return d
+
+
+def latest_close(ticker: str) -> float | None:
+    """Fast keyless lookup of the latest confirmed close for any KR ticker."""
+    d = _listing_dict()
+    val = d.get(ticker)
+    if val is not None and not pd.isna(val) and val > 0:
+        return float(val)
+    return None
+
+
+def batch_latest_closes(tickers: list[str]) -> dict[str, float | None]:
+    """Concurrent/batch lookup of latest confirmed close for multiple KR tickers."""
+    d = _listing_dict()
+    return {t: (float(d[t]) if t in d and not pd.isna(d[t]) and d[t] > 0 else None) for t in tickers}
+
+
+
 # ── account-gated (KRX MDC) ──────────────────────────────────────────────────
 def _stock():
     try:

@@ -133,3 +133,62 @@ def test_prometheus_metrics(client):
     assert "# TYPE surge_equity gauge" in body
     assert 'surge_equity{mode="paper"}' in body
     assert "surge_kill_switch_active" in body
+
+
+def test_watch_targets_and_kr_pricing(client, monkeypatch):
+    """Watch targets returns 40+ curated symbols and handles KR pricing."""
+    from surge.sources import krx
+
+    monkeypatch.setattr(krx, "batch_latest_closes", lambda syms: {s: 100_000.0 for s in syms})
+    r = client.get("/api/watch")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["n"] >= 40
+    kr_items = [i for i in body["items"] if i.get("mkt") == "kr"]
+    assert len(kr_items) >= 15
+    # KR items have prices populated
+    assert any(i.get("price") == 100_000.0 for i in kr_items)
+
+
+def test_duel_stand_aside_ref_leg_mapping(client, monkeypatch):
+    """When a duel decision is STAND_ASIDE, ref_leg must match the direction of score."""
+    from surge.db import connect
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO duel_decisions (decision_date, pair, side, score, conviction, "
+            "size_factor, entry_ref, stop_price, target_price, captured_at) "
+            "VALUES ('2026-10-10', 'tna_tza', 'STAND_ASIDE', -0.2, 0.1, 0.0, 45.0, 43.0, 48.0, "
+            "'2026-10-10T00:00:00+00:00')"
+        )
+    from surge.dashboard import api
+    monkeypatch.setattr(api, "_live_prices", lambda syms, deadline=5.0: {s: 45.5 for s in syms})
+    r = client.get("/api/duel")
+    assert r.status_code == 200
+    body = r.json()
+    call = next(c for c in body["calls"] if c["pair"] == "tna_tza")
+    assert call["side"] == "STAND_ASIDE"
+    assert call["ref_leg"] == "TZA"
+    assert call["current"] == 45.5
+
+
+def test_watchlist_live_price_field(client, monkeypatch):
+    """Watchlist candidates expose live_price alongside close."""
+    from surge.db import connect, ensure_securities
+
+    with connect() as conn:
+        ensure_securities(conn, ["TEST_SYM"])
+        conn.execute(
+            "INSERT INTO candidates (snapshot_date, symbol, score, close, pct_change, captured_at) "
+            "VALUES ('2026-10-10', 'TEST_SYM', 9.0, 10.0, 5.0, '2026-10-10T00:00:00+00:00')"
+        )
+    from surge.dashboard import api
+    monkeypatch.setattr(api, "_live_prices", lambda syms, deadline=3.0: {"TEST_SYM": 12.5})
+    r = client.get("/api/watchlist")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) > 0
+    test_cand = next(c for c in body if c["symbol"] == "TEST_SYM")
+    assert test_cand["close"] == 10.0
+    assert test_cand["live_price"] == 12.5
+

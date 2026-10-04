@@ -198,12 +198,19 @@ def decide(ctx: dict, entry_ref: dict[str, float] | None = None,
 
 
 def _gap_guard(ctx: dict) -> float | None:
-    """Guard threshold in RETURN units (z·σ20 of the underlying), or None."""
+    """Guard threshold in RETURN units: either z·σ20 or max_gap_atr·ATR, or None."""
     z = settings.duel_gap_guard_z
     vol = ctx.get("und_vol20")
-    if z <= 0 or not vol:
-        return None
-    return round(z * float(vol), 5)
+    if z > 0 and vol:
+        return round(z * float(vol), 5)
+
+    max_gap_atr = settings.duel_max_gap_atr
+    atr = ctx.get("und_atr14_pct")
+    if atr is None and isinstance(ctx.get("atr_pct"), dict):
+        atr = ctx["atr_pct"].get("und")
+    if max_gap_atr > 0 and atr:
+        return round(max_gap_atr * float(atr), 5)
+    return None
 
 
 def guard_triggered(side: str, pair: dict, gap_guard: float | None,

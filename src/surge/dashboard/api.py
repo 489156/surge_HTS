@@ -96,6 +96,19 @@ def health() -> dict:
     }
 
 
+@app.get("/api/integrity")
+def data_integrity() -> dict:
+    """Continuous data integrity audit: validates universe ticker registry against
+    exchange listings and checks for cross-asset price invariants."""
+    from ..sources.integrity import verify_ticker_registry
+
+    try:
+        reg = verify_ticker_registry()
+        return {"status": reg["status"], "registry": reg}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "error": str(exc)}
+
+
 @app.get("/api/watchlist")
 def watchlist(limit: int = 25) -> list[dict]:
     with connect() as conn:
@@ -107,25 +120,39 @@ def watchlist(limit: int = 25) -> list[dict]:
             "FROM candidates WHERE snapshot_date=? ORDER BY score DESC LIMIT ?",
             (latest, limit),
         ).fetchall()
-    return [dict(r) for r in rows]
+    res = [dict(r) for r in rows]
+    # Enrich with live prices so volatile screener candidates show actual current prices
+    syms = [r["symbol"] for r in res]
+    live = _live_prices(syms, deadline=3.0)
+    for r in res:
+        lp = live.get(r["symbol"])
+        r["live_price"] = lp if lp is not None else r["close"]
+    return res
 
 
 @app.get("/api/watch")
 def watch_targets() -> dict:
     """Curated, hand-maintained tracking universe (`surge watch`) — DISTINCT from the
     surge SCREENER watchlist above. US legs get a LIVE price (concurrent, cached); KR
-    legs have no keyless real-time source so price is None (theme/horizons only). A
-    tracking list for reference, NOT a recommendation."""
+    legs get confirmed EOD close from KRX. A tracking list for reference, NOT a
+    recommendation."""
+    from ..sources import krx
     from ..watch.targets import TARGETS
 
     out: dict = {"items": [], "n": 0}
     try:
-        px = _live_prices([t["t"] for t in TARGETS if t.get("mkt") == "us"])
+        us_syms = [t["t"] for t in TARGETS if t.get("mkt") == "us"]
+        kr_syms = [t["t"] for t in TARGETS if t.get("mkt") == "kr"]
+        us_px = _live_prices(us_syms)
+        kr_px = krx.batch_latest_closes(kr_syms)
         for t in TARGETS:
+            sym = t["t"]
+            mkt = t.get("mkt")
+            price = us_px.get(sym) if mkt == "us" else kr_px.get(sym)
             out["items"].append({
-                "t": t["t"], "name": t["name"], "mkt": t["mkt"], "theme": t["theme"],
+                "t": sym, "name": t["name"], "mkt": mkt, "theme": t["theme"],
                 "h": t["h"], "room": t["room"],
-                "price": px.get(t["t"]) if t.get("mkt") == "us" else None,
+                "price": price,
             })
         out["n"] = len(out["items"])
     except Exception as exc:  # noqa: BLE001
@@ -270,6 +297,8 @@ def learning_log(limit: int = 14) -> dict:
                 "run_date": r["run_date"], "created_at": r["created_at"],
                 "headline": p.get("headline"), "scored": p.get("scored"),
                 "discovered_new": p.get("discovered_new") or [],
+                "discovered_rotation": p.get("discovered_rotation") or [],
+                "pruned_variants": p.get("pruned_variants") or [],
                 "changes": p.get("changes") or [],
                 "promote_ready": p.get("promote_ready") or [],
                 "stale_inputs": p.get("stale_inputs") or [],
@@ -362,14 +391,32 @@ def duel_calls() -> dict:
         now = _dt.datetime.now(_dt.timezone.utc)
         out["date"] = latest
         out["fetched_at"] = now.isoformat(timespec="seconds")
-        legs = {r["side"] if r["side"] != "STAND_ASIDE"
-                else PAIRS.get(r["pair"], {}).get("bull") for r in rows}
+        def _target_leg(row) -> str | None:
+            side = row["side"]
+            if side and side != "STAND_ASIDE":
+                return side
+            p = PAIRS.get(row["pair"], {})
+            # When STAND_ASIDE, entry_ref was computed on the slight lean leg:
+            # score >= 0 -> bull, score < 0 -> bear
+            score = row["score"] or 0
+            return p.get("bull" if score >= 0 else "bear")
+
+        from ..sources.integrity import assert_pair_leg_consistency, validate_price_sanity
+
+        legs = {_target_leg(r) for r in rows}
         prices = _live_prices([leg for leg in legs if leg])   # concurrent, ≤5s
         for r in rows:
             c = dict(r)
-            leg = r["side"] if r["side"] != "STAND_ASIDE" else \
-                PAIRS.get(r["pair"], {}).get("bull")
-            c["current"] = prices.get(leg)
+            leg = _target_leg(r)
+            c["ref_leg"] = leg
+            cur_px = prices.get(leg)
+            # Mathematical invariant: entry leg and live price leg MUST NEVER differ
+            assert_pair_leg_consistency(c.get("pair", ""), c.get("ref_leg"), leg)
+            if cur_px is not None:
+                ok, reason = validate_price_sanity(leg, cur_px, c.get("entry_ref"))
+                if not ok:
+                    c["price_warning"] = reason
+            c["current"] = cur_px
             try:
                 cap = _dt.datetime.fromisoformat(r["captured_at"])
                 c["age_hours"] = round((now - cap).total_seconds() / 3600, 1)
@@ -386,10 +433,9 @@ def duel_calls() -> dict:
 @app.get("/api/rotation")
 def rotation_calls() -> dict:
     """Latest KR value-chain rotation candidates (gate-passed first), with the
-    analysis time (`captured_at`) and decision-day close (`ref_close`). The screen
-    runs once per KR session after the 15:30 KST close; the dashboard shows the
-    latest stored run (current price is in the click-detail — KR isn't real-time
-    keyless). `age_hours`/`stale` make a missed run visible."""
+    analysis time (`captured_at`), decision-day close (`ref_close`), and latest
+    confirmed KR close (`current_close`). The screen runs once per KR session
+    after the 15:30 KST close. `age_hours`/`stale` make a missed run visible."""
     import datetime as _dt
 
     out: dict = {"date": None, "candidates": [], "captured_at": None,
@@ -406,6 +452,12 @@ def rotation_calls() -> dict:
                     "WHERE decision_date=? ORDER BY passed_filter DESC, score DESC "
                     "LIMIT 12", (latest,)).fetchall()]
         if out["candidates"]:
+            from ..sources import krx
+            tickers = [c["ticker"] for c in out["candidates"]]
+            kr_px = krx.batch_latest_closes(tickers)
+            for c in out["candidates"]:
+                c["current_close"] = kr_px.get(c["ticker"]) or c.get("ref_close")
+
             cap = out["candidates"][0].get("captured_at")
             out["captured_at"] = cap
             try:

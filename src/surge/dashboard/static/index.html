@@ -315,21 +315,24 @@ async function refresh(){
   $('#duel').innerHTML=thead(['pair','방향·확신','진입','현재(실시간)','손절','익절'])+(du.calls||[]).map(x=>{
     const c=Math.abs(x.score),dir=x.score>=0?'▲강세':'▼약세';
     const tier=c<0.15?'관망':c<0.35?'하프':'풀',bar=c<0.15?'○○○':c<0.35?'●●○':'●●●';
-    const dv=x.side==='STAND_ASIDE'?'<span class="mut">⏸ 관망</span>'
+    const isAside=x.side==='STAND_ASIDE';
+    const dv=isAside?`<span class="mut">⏸ 관망 (${x.ref_leg||'—'})</span>`
       :`<b>${x.side}</b> <span class="${cls(x.score)}">${dir}</span> · 확신 ${tier} <span class="mut mono">${bar}</span>`;
     const cur=x.current!=null?'$'+fmt(x.current):'—';
     let curCell=cur;                                  // live price + move-vs-static-call
     if(x.current!=null&&x.entry_ref){
       const dEnt=(x.current-x.entry_ref)/x.entry_ref*100; let tag='';
-      if(x.stop_price&&x.target_price){
+      if(!isAside && x.stop_price && x.target_price){
         const toStop=(x.current-x.stop_price)/x.current*100, toTgt=(x.target_price-x.current)/x.current*100;
         if(toStop<=0) tag=' <span class="neg">손절이탈</span>';
         else if(toTgt<=0) tag=' <span class="pos">익절돌파</span>';
         else if(toStop<=1) tag=' <span class="neg">손절근접</span>';
         else if(toTgt<=1) tag=' <span class="pos">익절근접</span>';
         else if(Math.abs(dEnt)<0.5) tag=' <span class="mut">진입권</span>';}
+      else if(isAside){
+        tag=' <span class="mut">관망권</span>';}
       curCell=`${cur}<br><span style="font-size:11px">vs진입 <span class="${cls(dEnt)}">${dEnt>=0?'+':''}${dEnt.toFixed(1)}%</span>${tag}</span>`
-        +duelGauge(x.stop_price,x.entry_ref,x.target_price,x.current);}   // 손절↔익절 위치 게이지
+        +(!isAside?duelGauge(x.stop_price,x.entry_ref,x.target_price,x.current):'');}
     return `<tr><td class="mut">${x.pair}</td><td>${dv}</td><td class="mono">${x.entry_ref?'$'+fmt(x.entry_ref):'—'}</td><td class="mono">${curCell}</td><td class="mono">${x.stop_price?'$'+fmt(x.stop_price):'—'}</td><td class="mono">${x.target_price?'$'+fmt(x.target_price):'—'}</td></tr>`;}).join('')||emptyRow(6);
   const age=du.calls&&du.calls[0]?du.calls[0].age_hours:null;
   $('#duel-asof').innerHTML=`콜: <b>${du.date||'—'}</b> 세션 · 생성 ${age==null?'—':age+'h 전'}`
@@ -341,11 +344,11 @@ async function refresh(){
 
   // ── rotation ──
   const ro=await j('/api/rotation');
-  $('#rotation').innerHTML=thead(['종목','체인 위치','후방거리','점수','분석가','통과'])+(ro.candidates||[]).map(x=>
-    `<tr class="clk" onclick="loadRot('${x.ticker}','${(x.name||x.ticker).replace(/'/g,'')}')"><td>${x.name||x.ticker}</td><td class="mut">${x.node||'—'}</td><td class="mono">${x.back_steps==null?'—':x.back_steps}</td><td class="mono">${fmt(x.score,2)}</td><td class="mono">${x.ref_close?'₩'+fmt(x.ref_close,0):'—'}</td><td>${x.passed_filter?'<span class="tag2 ok">✓</span>':'<span class="mut">·</span>'}</td></tr>`).join('')||emptyRow(6);
+  $('#rotation').innerHTML=thead(['종목','체인 위치','후방거리','점수','분석가','최근종가','통과'])+(ro.candidates||[]).map(x=>
+    `<tr class="clk" onclick="loadRot('${x.ticker}','${(x.name||x.ticker).replace(/'/g,'')}')"><td>${x.name||x.ticker}</td><td class="mut">${x.node||'—'}</td><td class="mono">${x.back_steps==null?'—':x.back_steps}</td><td class="mono">${fmt(x.score,2)}</td><td class="mono">${x.ref_close?'₩'+fmt(x.ref_close,0):'—'}</td><td class="mono">${x.current_close?'₩'+fmt(x.current_close,0):'—'}</td><td>${x.passed_filter?'<span class="tag2 ok">✓</span>':'<span class="mut">·</span>'}</td></tr>`).join('')||emptyRow(7);
   $('#rotation-asof').innerHTML=`분석: <b>${ro.date||'—'}</b> 세션 · 생성 ${ro.age_hours==null?'—':ro.age_hours+'h 전'}`
     +(ro.stale?' <span class="neg">⚠ 신규 분석 없음(KR 마감 후 1회) → surge rotation 필요</span>':'')
-    +` · 분석가=분석일 종가 · 현재가는 행 클릭`;
+    +` · 분석가=분석시점 · 최근종가=KRX 확정 종가`;
   const kf=ro.kr_factor;
   if(kf&&kf.top){const t=kf.top[1]||kf.top;const nm=kf.top[0]||'kr_search_surge';
     const verdict=kf.recommend?'<span class="pos">추가 후보</span>':(t.caveat?'<span class="neg">⚠ '+t.caveat+'</span>':'<span class="mut">기저 미초과</span>');
@@ -360,16 +363,16 @@ async function refresh(){
     ?`🧩 <b>추가 후보: ${fb.recommend.factor}</b> — 기준선 ${(base*100).toFixed(0)}% 유의 초과(z=${fb.recommend.z.toFixed(2)})`
     :`추가 후보 없음 · 기준선(always-bull) <b>${base==null?'—':(base*100).toFixed(0)+'%'}</b> — 현 후보군은 기준선을 유의하게 못 넘음`;
 
-  // ── curated watch (hand-maintained tracking universe; US live, KR theme-only) ──
+  // ── curated watch (hand-maintained tracking universe; US live, KR confirmed close) ──
   const wa=await j('/api/watch'),WI=wa.items||[];
   const roomLbl={high:'<span class="pos">높음</span>',mid:'중',low:'<span class="mut">낮음</span>',na:'<span class="mut">—</span>'};
   const hzLbl={short:'단기',swing:'스윙',long:'장기'};
-  $('#watch').innerHTML=thead(['종목','테마','시장','현재가','지평','여지(10x)'])+WI.map(x=>{
-    const px=x.mkt==='us'?(x.price!=null?'$'+fmt(x.price):'<span class="mut">—</span>'):'<span class="mut">— (KR 실시간없음)</span>';
+  $('#watch').innerHTML=thead(['종목','테마','시장','현재가(최근종가)','지평','여지(10x)'])+WI.map(x=>{
+    const px=x.price!=null?(x.mkt==='us'?'$'+fmt(x.price):'₩'+fmt(x.price,0)):`<span class="mut">—</span>`;
     const hz=(x.h||[]).map(z=>hzLbl[z]||z).join('·');
     return `<tr><td><b>${x.t}</b> <span class="mut">${x.name}</span></td><td class="mut">${x.theme}</td><td class="mut">${(x.mkt||'').toUpperCase()}</td><td class="mono">${px}</td><td class="mut">${hz}</td><td>${roomLbl[x.room]||x.room}</td></tr>`;}).join('')||emptyRow(6);
   const nUS=WI.filter(z=>z.mkt==='us').length;
-  $('#watch-note').innerHTML=`${WI.length}종목 추적 · US ${nUS}(실시간) / KR ${WI.length-nUS}(테마) · <b>원전·SMR</b>: LEU·OKLO·SMR 포함 · 추천 아님(추적용)`;
+  $('#watch-note').innerHTML=`${WI.length}종목 추적 · US ${nUS}(실시간) / KR ${WI.length-nUS}(최근종가) · <b>원전·SMR</b>: LEU·OKLO·SMR 포함 · 추천 아님(추적용)`;
 
   // ── daily self-improvement log ──
   const lg=await j('/api/learning'),LR=lg.runs||[];
@@ -446,8 +449,9 @@ async function refresh(){
     +brow('KR rotation',rTxt)+brow('모의계좌',aTxt)+brow('→ 행동',act);
 
   const w=await j('/api/watchlist?limit=12');
-  $('#watchlist').innerHTML=thead(['sym','score','price','chg','float','rvol'])+w.map(x=>
-    `<tr><td>${x.symbol}</td><td class="mono">${fmt(x.score,1)}</td><td class="mono">${fmt(x.close)}</td><td class="mono ${cls(x.pct_change)}">${x.pct_change==null?'—':fmt(x.pct_change,0)+'%'}</td><td class="mono">${x.shares_float?fmt(x.shares_float/1e6,1)+'M':'—'}</td><td class="mono">${fmt(x.rvol,1)}</td></tr>`).join('')||emptyRow(6);
+  $('#watchlist').innerHTML=thead(['sym','score','price','chg','float','rvol'])+w.map(x=>{
+    const p=x.live_price!=null?x.live_price:x.close;
+    return `<tr><td>${x.symbol}</td><td class="mono">${fmt(x.score,1)}</td><td class="mono">${fmt(p)}</td><td class="mono ${cls(x.pct_change)}">${x.pct_change==null?'—':fmt(x.pct_change,0)+'%'}</td><td class="mono">${x.shares_float?fmt(x.shares_float/1e6,1)+'M':'—'}</td><td class="mono">${fmt(x.rvol,1)}</td></tr>`;}).join('')||emptyRow(6);
 
   const d=await j('/api/decisions?limit=10');
   $('#decisions').innerHTML=thead(['time','sym','action','net','conf'])+d.map(x=>

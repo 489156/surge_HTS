@@ -146,7 +146,10 @@ def run_daily(write: bool = True) -> dict:
 
     # ── 2. EVOLVE — register newly-proposed hypotheses (self-evolution; reversible) ──
     _safe("evolve", learn.register_discovered, warnings)
+    _safe("evolve_rotation", learn.register_rotation_discovered, warnings)
+    pruned = _safe("prune", learn.prune_stale_discovered, warnings) or []
     all_disc = sorted(_safe("discovered", learn.discovered_variants, warnings) or {})
+    all_disc_rot = sorted(_safe("discovered_rotation", learn.discovered_rotation_variants, warnings) or {})
 
     # ── 2.5 변인 추정 — how the walk-forward learner's weight estimates moved ──
     # (recorded nightly by the duel call; summarized here so learning_log keeps
@@ -284,6 +287,8 @@ def run_daily(write: bool = True) -> dict:
         "scored": scored,
         "discovered_new": discovered_new,
         "discovered_all": all_disc,
+        "discovered_rotation": all_disc_rot,
+        "pruned_variants": pruned,
         "evidence": evidence,
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed

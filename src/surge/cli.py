@@ -1323,11 +1323,27 @@ def _cmd_daily(_args) -> int:
     return 0
 
 
+def _cmd_integrity(_args) -> int:
+    from .sources.integrity import verify_ticker_registry
+    res = verify_ticker_registry()
+    print(f"Status: {res['status']} | Verified: {res['verified']} symbols")
+    if res['errors']:
+        print("Warnings/Errors:")
+        for e in res['errors']:
+            print(f"  - {e}")
+        return 1
+    print("All ticker registries and symbols cleanly validated.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="surge", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="create the database").set_defaults(func=_cmd_init)
+    sub.add_parser("integrity", help="전 종목 시세 무결성 및 티커 레지스트리 교차 검증").set_defaults(
+        func=_cmd_integrity
+    )
     sub.add_parser("universe", help="refresh securities master").set_defaults(
         func=_cmd_universe
     )

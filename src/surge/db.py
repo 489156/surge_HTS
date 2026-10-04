@@ -36,6 +36,9 @@ def init_db(db_path: Path | None = None) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 15000")
         _migrate_sqlite(conn)
         conn.executescript(_schema_sql())
     logger.info("DB ready at {}", path)
@@ -63,10 +66,12 @@ def connect(db_path: Path | None = None):
     path = Path(db_path or settings.db_path)
     if not path.exists():
         init_db(path)
-    conn = sqlite3.connect(path, timeout=10.0)
+    conn = sqlite3.connect(path, timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 10000")  # tolerate concurrent writers
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 15000")  # tolerate concurrent writers
     try:
         yield conn
         conn.commit()

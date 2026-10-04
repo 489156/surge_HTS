@@ -149,21 +149,48 @@ def component_sign_accuracy(min_n: int | None = None) -> dict[str, dict]:
             for name, h in agg.items() if len(h) >= min_n}
 
 
+def component_culprit_rates(min_n: int = 20) -> dict[str, float]:
+    """Calculate how often each component was the primary culprit in INCORRECT bets.
+    Identifies structurally deceptive signals that lead the model astray."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT components, soxx_oc_ret FROM duel_decisions "
+            "WHERE side != 'STAND_ASIDE' AND correct = 0 "
+            "AND soxx_oc_ret IS NOT NULL AND components IS NOT NULL"
+        ).fetchall()
+    if len(rows) < min_n:
+        return {}
+    culprits: dict[str, int] = {}
+    total_incorrect = len(rows)
+    for r in rows:
+        label = r["soxx_oc_ret"]
+        try:
+            comps = json.loads(r["components"])
+        except (ValueError, TypeError):
+            continue
+        wrong = [c for c in comps if c.get("value") and c["value"] * label < 0]
+        if wrong:
+            c_culprit = max(wrong, key=lambda c: abs(c["value"]) * c.get("weight", 1.0))
+            name = c_culprit["name"]
+            culprits[name] = culprits.get(name, 0) + 1
+    return {name: count / total_incorrect for name, count in culprits.items()}
+
+
 def propose_challengers(min_n: int | None = None, invert_below: float = 0.40,
                         drop_below: float = 0.45,
                         existing_maps: set | None = None) -> dict[str, dict]:
     """Turn anti-predictive components into NEW raceable hypotheses — calibrated
-    to how anti-predictive they are, not one-size-fits-all:
-      · acc ≤ invert_below (strongly backwards, e.g. momentum 0.12) → INVERT (-1)
-      · invert_below < acc ≤ drop_below (near-coin, not worth its weight) → DROP (0)
-    Inverting a near-coin signal would be an over-strong claim that it is reliably
-    backwards, so the milder remedy is to drop it. `existing_maps` (a set of
-    frozenset(map.items())) lets the caller skip a proposal behaviourally
-    identical to a variant already in the race. Proposals only — never
-    auto-promoted."""
+    to how anti-predictive they are, with adaptive bottom-quartile detection:
+      · acc ≤ invert_below (strongly backwards) → INVERT (-1)
+      · invert_below < acc ≤ drop_below (near-coin) → DROP (0)
+      · Adaptive: if no factor triggers the fixed threshold, test bottom-performing
+        components below 0.49 if sample is sufficient (breaks stagnation)."""
     existing_maps = existing_maps or set()
     out: dict[str, dict] = {}
-    for name, s in component_sign_accuracy(min_n).items():
+    accs = component_sign_accuracy(min_n)
+    
+    # Standard threshold proposals
+    for name, s in accs.items():
         acc = s["acc"]
         if acc <= invert_below:
             tag, m = f"disc_inv_{name}", {name: -1.0}
@@ -171,10 +198,177 @@ def propose_challengers(min_n: int | None = None, invert_below: float = 0.40,
             tag, m = f"disc_drop_{name}", {name: 0.0}
         else:
             continue
-        if frozenset(m.items()) in existing_maps:   # already raced — no new info
+        if frozenset(m.items()) in existing_maps:
             continue
         out[tag] = m
+
+    # Adaptive bottom-quartile trigger to prevent evolutionary stagnation
+    # Only triggered if no standard proposals exist and the worst component is not already modified
+    already_covered_comps = {k for m in existing_maps for k, v in m}
+    if not out and accs:
+        sorted_accs = sorted(accs.items(), key=lambda kv: kv[1]["acc"])
+        worst_name, worst_stat = sorted_accs[0]
+        if worst_stat["acc"] < 0.49 and worst_name not in already_covered_comps:
+            tag = f"disc_adapt_drop_{worst_name}"
+            m = {worst_name: 0.0}
+            if frozenset(m.items()) not in existing_maps:
+                out[tag] = m
     return out
+
+
+def propose_culprit_challengers(min_rate: float = 0.15,
+                                existing_maps: set | None = None) -> dict[str, dict]:
+    """Propose multi-factor hypotheses targeting persistent culprits in wrong calls.
+    If a signal accounts for >= min_rate (e.g. 15%) of all wrong bets, test dropping it
+    while reinforcing reliable signals (e.g. futures / vix_regime)."""
+    existing_maps = existing_maps or set()
+    out: dict[str, dict] = {}
+    culprit_rates = component_culprit_rates()
+    for name, rate in culprit_rates.items():
+        if rate >= min_rate:
+            # Defensive hypothesis: drop the culprit, boost vix_regime
+            tag_drop = f"disc_culprit_drop_{name}"
+            m_drop = {name: 0.0, "vix_regime": 1.5}
+            if frozenset(m_drop.items()) not in existing_maps:
+                out[tag_drop] = m_drop
+
+            # Invert hypothesis: reverse the culprit
+            tag_inv = f"disc_culprit_inv_{name}"
+            m_inv = {name: -1.0, "futures": 1.5}
+            if frozenset(m_inv.items()) not in existing_maps:
+                out[tag_inv] = m_inv
+    return out
+
+
+def propose_conflict_challengers(min_n: int = 15,
+                                 existing_maps: set | None = None) -> dict[str, dict]:
+    """Analyze sessions where asia_lead and futures pointed in OPPOSITE directions.
+    Propose hypotheses prioritizing the historically winning signal in conflicts."""
+    existing_maps = existing_maps or set()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT components, soxx_oc_ret FROM duel_decisions "
+            "WHERE soxx_oc_ret IS NOT NULL AND components IS NOT NULL"
+        ).fetchall()
+    
+    asia_wins, futures_wins = 0, 0
+    conflict_count = 0
+    for r in rows:
+        label = r["soxx_oc_ret"]
+        if not label:
+            continue
+        try:
+            comps = json.loads(r["components"])
+        except (ValueError, TypeError):
+            continue
+        cmap = {c["name"]: c.get("value", 0.0) for c in comps}
+        asia_val = cmap.get("asia_lead", 0.0)
+        fut_val = cmap.get("futures", 0.0)
+        if asia_val != 0 and fut_val != 0 and (asia_val > 0) != (fut_val > 0):
+            conflict_count += 1
+            if (asia_val > 0) == (label > 0):
+                asia_wins += 1
+            if (fut_val > 0) == (label > 0):
+                futures_wins += 1
+
+    out: dict[str, dict] = {}
+    if conflict_count >= min_n:
+        if futures_wins > asia_wins * 1.3:
+            tag = "disc_conflict_trust_futures"
+            m = {"futures": 2.0, "asia_lead": 0.3}
+            if frozenset(m.items()) not in existing_maps:
+                out[tag] = m
+        elif asia_wins > futures_wins * 1.3:
+            tag = "disc_conflict_trust_asia"
+            m = {"asia_lead": 2.0, "futures": 0.3}
+            if frozenset(m.items()) not in existing_maps:
+                out[tag] = m
+    return out
+
+
+def propose_rotation_challengers(min_n: int = 15,
+                                 existing_maps: set | None = None) -> dict[str, dict]:
+    """Forward-driven hypothesis generation for Korean rotation value chains.
+    Analyzes which components (smart_money, rvol, chain_pos, momentum) actually
+    correlated with positive T+5 returns, and proposes tailored weightings."""
+    existing_maps = existing_maps or set()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT components, ret_t5 FROM rotation_decisions "
+            "WHERE ret_t5 IS NOT NULL AND components IS NOT NULL"
+        ).fetchall()
+    if len(rows) < min_n:
+        return {}
+
+    # Check component returns
+    comp_hits: dict[str, list[float]] = {}
+    for r in rows:
+        ret = r["ret_t5"]
+        try:
+            comps = json.loads(r["components"])
+        except (ValueError, TypeError):
+            continue
+        for k, v in comps.items():
+            if isinstance(v, (int, float)):
+                comp_hits.setdefault(k, []).append(v * ret)
+
+    out: dict[str, dict] = {}
+    for comp, products in comp_hits.items():
+        if len(products) >= min_n and sum(products) < -0.1:  # persistent negative drag
+            tag = f"disc_kr_drop_{comp}"
+            m = {comp: 0.0}
+            if frozenset(m.items()) not in existing_maps:
+                out[tag] = m
+        elif len(products) >= min_n and sum(products) > 0.5:  # strong positive driver
+            tag = f"disc_kr_boost_{comp}"
+            m = {comp: 2.5}
+            if frozenset(m.items()) not in existing_maps:
+                out[tag] = m
+    return out
+
+
+def prune_stale_discovered(min_evals: int = 35, z_cutoff: float = -0.5) -> list[str]:
+    """Prune underperforming discovered variants from model_state.
+    If a discovered hypothesis has been tested for >= min_evals and performs
+    consistently below the champion/baseline (z < z_cutoff), remove it.
+    This holds the Šidák multiple-testing penalty (k) in check so genuine edges
+    can be promoted without excessive family-wise barrier inflation."""
+    disc = discovered_variants()
+    if not disc:
+        return []
+    
+    from .duel.variants import score_variant
+    # Fetch performance of discovered variants
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT variant, COUNT(*) n, SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) wins "
+            "FROM duel_variants WHERE correct IS NOT NULL GROUP BY variant"
+        ).fetchall()
+    perf = {r["variant"]: (r["wins"], r["n"]) for r in rows}
+
+    pruned = []
+    retained = {}
+    for name, m in disc.items():
+        if name in perf:
+            wins, n = perf[name]
+            if n >= min_evals:
+                # One-proportion z vs 0.50 coin
+                p = wins / n
+                z = (p - 0.50) / math.sqrt(0.25 / n)
+                if z < z_cutoff:
+                    pruned.append(name)
+                    continue
+        retained[name] = m
+
+    if pruned:
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO model_state (key, value, updated_at) VALUES "
+                "('discovered_variants', ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at",
+                (json.dumps(retained), utc_now())
+            )
+    return pruned
 
 
 def discovered_variants() -> dict[str, dict]:
@@ -191,26 +385,64 @@ def discovered_variants() -> dict[str, dict]:
         return {}
 
 
+def discovered_rotation_variants() -> dict[str, dict]:
+    """Persisted auto-discovered variants for Korean rotation."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM model_state WHERE key='discovered_rotation_variants'"
+        ).fetchone()
+    if not row or not row["value"]:
+        return {}
+    try:
+        return json.loads(row["value"])
+    except (ValueError, TypeError):
+        return {}
+
+
 def register_discovered(min_n: int | None = None) -> dict[str, dict]:
-    """Run the proposer and merge any NEW hypotheses into the persisted set so
-    they start being captured/scored forward. Idempotent, and de-duplicates
-    against BOTH the static duel variants and previously-discovered ones so the
-    race never carries two behaviourally identical variants (which would only
-    waste a capture row and inflate the Šidák family size). Returns additions."""
+    """Run all specialized proposers (1D anti-predictive, culprit-defense, and conflict)
+    and merge new hypotheses into the persisted set. Idempotent and de-duplicated.
+    Returns additions."""
     from .duel.variants import VARIANTS as STATIC   # lazy: avoid import cycle
 
     existing = discovered_variants()
     existing_maps = {frozenset(m.items())
                      for m in (*STATIC.values(), *existing.values())}
-    fresh = {k: v for k, v in
-             propose_challengers(min_n, existing_maps=existing_maps).items()
-             if k not in existing}
-    if fresh:
-        merged = {**existing, **fresh}
+
+    fresh: dict[str, dict] = {}
+    fresh.update(propose_challengers(min_n, existing_maps=existing_maps))
+    fresh.update(propose_culprit_challengers(existing_maps=existing_maps))
+    fresh.update(propose_conflict_challengers(existing_maps=existing_maps))
+
+    new_additions = {k: v for k, v in fresh.items() if k not in existing}
+    if new_additions:
+        merged = {**existing, **new_additions}
         with connect() as conn:
             conn.execute(
                 "INSERT INTO model_state (key, value, updated_at) VALUES "
                 "('discovered_variants', ?, ?) ON CONFLICT(key) DO UPDATE SET "
                 "value=excluded.value, updated_at=excluded.updated_at",
                 (json.dumps(merged), utc_now()))
+    return new_additions
+
+
+def register_rotation_discovered(min_n: int = 15) -> dict[str, dict]:
+    """Register newly proposed Korean rotation hypotheses."""
+    from .rotation.engine import VARIANTS as STATIC
+
+    existing = discovered_rotation_variants()
+    existing_maps = {frozenset(m.items())
+                     for m in (*STATIC.values(), *existing.values())}
+    fresh = {k: v for k, v in
+             propose_rotation_challengers(min_n, existing_maps=existing_maps).items()
+             if k not in existing}
+    if fresh:
+        merged = {**existing, **fresh}
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO model_state (key, value, updated_at) VALUES "
+                "('discovered_rotation_variants', ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at",
+                (json.dumps(merged), utc_now()))
     return fresh
+

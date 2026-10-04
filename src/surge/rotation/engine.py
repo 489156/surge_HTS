@@ -52,6 +52,12 @@ VARIANTS: dict[str, dict[str, float]] = {
 }
 
 
+def all_variants() -> dict[str, dict[str, float]]:
+    """Static Korean rotation variants + dynamically discovered variants."""
+    from .. import learn
+    return {**VARIANTS, **learn.discovered_rotation_variants()}
+
+
 def _variant_score(comps: dict[str, float], mult: dict[str, float]) -> float:
     num = den = 0.0
     default = mult.get("*", 1.0)
@@ -268,7 +274,7 @@ def variant_leaderboard(top_k: int = 3) -> dict:
         by_day.setdefault(r["decision_date"], []).append(r)
 
     stats: dict[str, dict] = {}
-    for name, mult in VARIANTS.items():
+    for name, mult in all_variants().items():
         rets, hits = [], []
         for _day, cand in by_day.items():
             ranked = sorted(cand, key=lambda c: _variant_score(c["_c"], mult),

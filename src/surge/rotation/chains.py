@@ -45,7 +45,7 @@ CHAINS: dict[str, dict] = {
 
 # query / coverage universe (KR names the analysis must consider)
 EXTRA_TICKERS = {
-    "000270": "기아", "140410": "메지온", "086520": "펩트론",
+    "000270": "기아", "140410": "메지온", "087010": "펩트론", "086520": "에코프로",
     "034020": "두산에너빌리티", "440110": "파두",
 }
 
