@@ -14,7 +14,7 @@ recommendation, reasoning) for 100% reproducible execution.
 from __future__ import annotations
 
 from .agents import Agent
-from .models import AgentOpinion, Recommendation
+from .models import AgentOpinion
 from . import llm
 
 

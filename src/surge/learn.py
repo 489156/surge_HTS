@@ -337,7 +337,6 @@ def prune_stale_discovered(min_evals: int = 35, z_cutoff: float = -0.5) -> list[
     if not disc:
         return []
     
-    from .duel.variants import score_variant
     # Fetch performance of discovered variants
     with connect() as conn:
         rows = conn.execute(

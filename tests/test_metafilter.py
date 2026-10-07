@@ -1,6 +1,5 @@
 """Unit tests for Meta-Labeling Quality Filter & Sizing (Qlib / Lopez de Prado pattern)."""
 
-import pytest
 
 from surge.trading.debate import run_debate
 from surge.trading.metafilter import MetaLabelingFilter

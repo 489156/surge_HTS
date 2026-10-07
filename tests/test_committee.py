@@ -1,6 +1,5 @@
 """Unit tests for Multi-Persona AI Investment Committee (virattt/ai-hedge-fund pattern)."""
 
-import pytest
 
 from surge.trading.committee import (
     AckmanCatalystAgent,

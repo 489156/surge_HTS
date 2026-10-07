@@ -24,7 +24,6 @@ def test_sqlite_wal_pragmas(tmp_path, monkeypatch):
 
 def test_simulate_bracket_break_even_ratchet():
     """Verify break-even ratchet stop protects profits after partial gain."""
-    entry = 100.0
     stop = 95.0
     target = 110.0
     ratchet_trigger = 105.0  # +5% triggers break-even

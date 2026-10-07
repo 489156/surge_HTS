@@ -27,9 +27,6 @@ def calculate_quant_tear_sheet(mode: TradingMode = TradingMode.PAPER) -> dict[st
             "SELECT ts, equity FROM account_history WHERE mode=? ORDER BY id ASC",
             (mode.value,),
         ).fetchall()
-        fills = conn.execute(
-            "SELECT side, qty, price FROM fills ORDER BY ts ASC",
-        ).fetchall()
 
     if len(rows) < 2:
         return {
