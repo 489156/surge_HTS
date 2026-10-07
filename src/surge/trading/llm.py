@@ -90,3 +90,67 @@ def analyze_news(symbol: str, headlines: list[str] | None) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM news analysis failed {}: {}", symbol, exc)
         return None
+
+
+def analyze_persona(symbol: str, persona_prompt: str, ctx: dict) -> dict | None:
+    """Evaluate a stock using a specific AI persona (Anthropic)."""
+    if not settings.anthropic_api_key:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        logger.warning("anthropic not installed — `uv sync --extra llm` to enable")
+        return None
+
+    # Format the context for the LLM
+    snap = ctx.get("snapshot") or {}
+    trap = ctx.get("trap") or {}
+    cats = ctx.get("catalysts") or []
+    macro = ctx.get("macro_regime", "neutral")
+    
+    context_str = f"Ticker: {symbol}\nMacro Regime: {macro}\n"
+    if snap:
+        context_str += f"Snapshot: Market Cap=${snap.get('market_cap', 0):,}, RVOL={snap.get('rvol', 0)}, Pct Change={snap.get('pct_change', 0)}%\n"
+    if trap:
+        context_str += f"Risk Flags: {trap}\n"
+    if cats:
+        context_str += f"Catalysts/Filings: {[c.get('detail') for c in cats]}\n"
+        
+    headlines = ctx.get("headlines") or fetch_headlines(symbol)
+    if headlines:
+        bullets = "\n".join(f"- {h}" for h in headlines[:5])
+        context_str += f"Recent News Headlines:\n{bullets}\n"
+        
+    system_prompt = (
+        f"{persona_prompt}\n"
+        "Analyze the provided stock context. Return STRICT JSON with keys:\n"
+        '"score" (number 0..100, 100=strong conviction to buy, 0=strong sell/veto),\n'
+        '"confidence" (number 0..100, how certain you are based on data),\n'
+        '"reasoning" (string, max 2 sentences explaining why).\n'
+        "Do NOT invent facts."
+    )
+    
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        msg = client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=300,
+            system=system_prompt,
+            messages=[{"role": "user", "content": context_str}],
+        )
+        raw = msg.content[0].text if msg.content else ""
+        
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        obj = json.loads(raw[start : end + 1])
+        
+        score = max(0.0, min(100.0, float(obj.get("score", 50.0))))
+        confidence = max(0.0, min(100.0, float(obj.get("confidence", 50.0))))
+        reasoning = str(obj.get("reasoning", ""))[:200]
+        
+        return {"score": score, "confidence": confidence, "reasoning": reasoning}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM persona analysis failed {}: {}", symbol, exc)
+        return None
+

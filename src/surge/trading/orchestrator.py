@@ -149,12 +149,32 @@ class TradingEngine:
 
         equity = metrics["equity"]
         decisions = []
+        
+        # Cost-saving hierarchical filter: only allow full LLM Committee eval on the top 3 candidates.
+        # The universe is already sorted by Technical score DESC.
+        MAX_LLM_EVALS = 3
+        llm_evals_done = 0
+        
         for symbol in universe:
             ref = last_prices.get(symbol)
             if not ref:
                 continue
             ctx = self._ctx(symbol, macro, status)
-            opinions = [a.evaluate(symbol, ctx) for a in self.agents]
+            
+            opinions = []
+            has_llm_agent = False
+            for a in self.agents:
+                is_llm_persona = hasattr(a, "persona_prompt")
+                if is_llm_persona:
+                    has_llm_agent = True
+                    if llm_evals_done >= MAX_LLM_EVALS:
+                        opinions.append(a._op(symbol, 50.0, 10.0, "Cost Filter: Skipped LLM evaluation"))
+                        continue
+                opinions.append(a.evaluate(symbol, ctx))
+                
+            if has_llm_agent:
+                llm_evals_done += 1
+                
             debate = run_debate(opinions, ctx=ctx)
             decision = self.pm.decide(symbol, opinions, debate, ref, self.mode)
             store.insert_decision(decision)

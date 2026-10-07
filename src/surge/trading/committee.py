@@ -15,14 +15,36 @@ from __future__ import annotations
 
 from .agents import Agent
 from .models import AgentOpinion, Recommendation
+from . import llm
 
 
-class BuffettQualityAgent(Agent):
+class LLMPersonaAgent(Agent):
+    persona_prompt: str = ""
+    
+    def evaluate(self, symbol: str, ctx: dict) -> AgentOpinion:
+        # 1. Try LLM first if API key is set
+        res = llm.analyze_persona(symbol, self.persona_prompt, ctx)
+        if res:
+            return self._op(symbol, res["score"], res["confidence"], f"[LLM] {res['reasoning']}")
+        # 2. Fallback to rule-based logic
+        return self.evaluate_rules(symbol, ctx)
+        
+    def evaluate_rules(self, symbol: str, ctx: dict) -> AgentOpinion:
+        return self._op(symbol, 50, 10, "unimplemented rule fallback")
+
+
+
+class BuffettQualityAgent(LLMPersonaAgent):
     """Quality & Moat evaluation: looks for positive operating margins, manageable debt,
     and business durability. Skeptical of pre-revenue or highly leveraged companies."""
     name = "buffett_agent"
+    persona_prompt = (
+        "You are Warren Buffett. Evaluate this stock for long-term compounding, economic moat, "
+        "and margin of safety. Reject highly leveraged, purely speculative, or cash-burning companies. "
+        "Look for durability and rational pricing."
+    )
 
-    def evaluate(self, symbol: str, ctx: dict) -> AgentOpinion:
+    def evaluate_rules(self, symbol: str, ctx: dict) -> AgentOpinion:
         snap = ctx.get("snapshot") or {}
         mc = snap.get("market_cap")
         trap = ctx.get("trap") or {}
@@ -47,12 +69,17 @@ class BuffettQualityAgent(Agent):
         return self._op(symbol, score, 60.0, reasons)
 
 
-class CathieMomentumAgent(Agent):
+class CathieMomentumAgent(LLMPersonaAgent):
     """Exponential Growth & Momentum: looks for explosive RVOL (>2.5), low float velocity,
     disruptive catalyst ignition, and parabolic potential."""
     name = "cathie_wood_agent"
+    persona_prompt = (
+        "You are Cathie Wood. Evaluate this stock for exponential disruptive innovation and momentum. "
+        "Prioritize explosive relative volume (RVOL), massive catalysts, and high-beta momentum. "
+        "You tolerate high volatility and risk if the upside potential is parabolic."
+    )
 
-    def evaluate(self, symbol: str, ctx: dict) -> AgentOpinion:
+    def evaluate_rules(self, symbol: str, ctx: dict) -> AgentOpinion:
         snap = ctx.get("snapshot") or {}
         rvol = snap.get("rvol") or 1.0
         pct_change = snap.get("pct_change") or 0.0
@@ -82,12 +109,17 @@ class CathieMomentumAgent(Agent):
         return self._op(symbol, score, confidence, why)
 
 
-class BurryForensicRiskAgent(Agent):
+class BurryForensicRiskAgent(LLMPersonaAgent):
     """Forensic Risk & Dilution Detection: scans for toxic death-spiral financing,
     ATM offerings, reverse split fatigue, float rotation traps, and bubble exhaustion."""
     name = "burry_short_agent"
+    persona_prompt = (
+        "You are Michael Burry. You are a forensic skeptic looking for hidden risks, toxic dilution, "
+        "pump-and-dump mechanics, and exhausted rallies. Veto heavily if you see S-1/S-3 filings, "
+        "warrants, or irrational price spikes without fundamentals."
+    )
 
-    def evaluate(self, symbol: str, ctx: dict) -> AgentOpinion:
+    def evaluate_rules(self, symbol: str, ctx: dict) -> AgentOpinion:
         trap = ctx.get("trap") or {}
         snap = ctx.get("snapshot") or {}
 
@@ -121,12 +153,17 @@ class BurryForensicRiskAgent(Agent):
         return self._op(symbol, 60.0, 45.0, "구조적 분식/희석 적신호 없음(숏 관점 리스크 통과)")
 
 
-class AckmanCatalystAgent(Agent):
+class AckmanCatalystAgent(LLMPersonaAgent):
     """Activist & Event-Driven Catalyst: evaluates decisive external triggers such as
     contracts, earnings surprises, regulatory approvals, or strategic partnerships."""
     name = "ackman_catalyst_agent"
+    persona_prompt = (
+        "You are Bill Ackman. Look for decisive catalyst events: new contracts, FDA approvals, "
+        "earnings beats, or activist interventions that unlock immediate shareholder value. "
+        "You want high-conviction event-driven plays."
+    )
 
-    def evaluate(self, symbol: str, ctx: dict) -> AgentOpinion:
+    def evaluate_rules(self, symbol: str, ctx: dict) -> AgentOpinion:
         catalysts = ctx.get("catalysts") or []
         earnings = [c for c in catalysts if c.get("event_type") == "earnings"]
         contracts = [c for c in catalysts if c.get("event_type") in ("contract", "fda", "partner")]
@@ -140,11 +177,15 @@ class AckmanCatalystAgent(Agent):
         return self._op(symbol, 50.0, 35.0, "명확한 펀더멘털 촉매(Catalyst) 부재")
 
 
-class GrahamSafetyAgent(Agent):
+class GrahamSafetyAgent(LLMPersonaAgent):
     """Deep Value & Margin of Safety: assesses downside protection and tangible liquidation floor."""
     name = "graham_value_agent"
+    persona_prompt = (
+        "You are Benjamin Graham. Look for deep value, tangible assets, and a massive margin of safety. "
+        "You dislike overvalued momentum stocks and prefer companies trading below their net current asset value."
+    )
 
-    def evaluate(self, symbol: str, ctx: dict) -> AgentOpinion:
+    def evaluate_rules(self, symbol: str, ctx: dict) -> AgentOpinion:
         snap = ctx.get("snapshot") or {}
         mc = snap.get("market_cap")
 
