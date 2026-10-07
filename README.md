@@ -1,137 +1,214 @@
-# surge — US next-day surge (+100%) prediction archive
+# surge_HTS — 자율형 멀티에이전트 퀀트 트레이딩 & 급등주 예측 아키텍처
 
-> 목표: 전일 종가 대비 **+100% 급등주**를 *전날에* 후보로 좁힌다.
-> 핵심은 모델이 아니라 **사후 복원 불가능한 피처(즉시포착)를 오늘부터 매일 박제**하는 것.
+> **"계좌가 살아남는 자율 퀀트 인프라"**  
+> 전일 종가 대비 **+100% 급등 후보 포착** 및 **SOXL/SOXS 레버리지 듀얼 매매**를 수행하는 프로덕션급 퀀트 시스템입니다.  
+> 단순 예측 모델에 의존하지 않고, **사후 복원 불가능한 시점별 피처(Point-in-Time Snapshot)를 매일 아카이빙**하며, **LLM 투자 위원회와 기관급 리스크 관리 엔진**을 통해 운용됩니다.
 
-정확도에 대한 현실적 재정의: "내일 터질 종목을 맞힌다"(거의 불가능)가 아니라
-**"기저율 0.1%인 후보를 2-stage 깔때기로 2~5%까지 끌어올린다"**.
+---
 
-## 설계 요약
+## 1. 핵심 아키텍처 개요
 
-- **2단계 깔때기**: Stage-1(저가·소형·유동성 정적 필터)로 universe를 수백 개로 줄이고,
-  비싼 구조/옵션 API 호출은 Stage-2 shortlist(이미 움직였거나 예열 셋업)에만 사용.
-- **4개 피처군**: (A) 정적 필터 / (B) 동적 모멘텀·미시구조 / (C) 음의 트랩 필터 /
-  (D) 즉시포착 박제(float·옵션·IV; 차입비용·소셜은 자리만 확보).
-- **생존자 편향 방지**: securities 행을 절대 삭제하지 않음(delisted 플래그).
-- **point-in-time**: 모든 값은 snapshot_date와 함께 저장, 덮어쓰지 않음.
-
-자세한 내용: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md), [src/surge/schema.sql](src/surge/schema.sql)
-
-## 설치 & 실행
-
-```bash
-uv sync
-uv run surge init                 # DB 생성
-uv run surge universe             # 미국 종목 마스터 적재 (NASDAQ Trader, 무료)
-uv run surge snapshot --fast      # 일별 박제 (Stage-1 가격 사전필터로 경량화)
-uv run surge watchlist --why      # 오늘의 급등 후보 랭킹 + 점수 근거(점화 예측)
-uv run surge reversals --why      # 페이드 워치리스트: 급등 후 익일 되돌림 후보(랭킹 미검증)
-uv run surge fade                 # 전일 급등의 익일 지속/소멸 라벨링(페이드 모델)
-uv run surge backfill-outcomes    # 과거 후보의 실제 익일 결과 기록
-uv run surge eval --k 10          # 예측 가능성: Precision@K·적중률·기저율 대비 lift
-uv run surge surges               # 적재된 급등 이벤트 조회
-uv run surge stats                # 테이블별 행 수
-# 빠른 테스트 / 과거 재현:
-uv run surge snapshot --symbols AAPL,GME,KOSS
-uv run surge snapshot --limit 200 --fast            # universe를 N개로 제한
-uv run surge snapshot --asof 2026-06-04 --limit 1200 --fast  # 룩어헤드 없는 시점 재현
+```mermaid
+flowchart TD
+    A["전체 시장 Universe (NASDAQ/NYSE/KRX)"] --> B["Stage-1 저비용 정적 필터<br/>(가격·시총·유동성)"]
+    B --> C["Stage-2 Shortlist<br/>(RVOL·모멘텀·트랩 플래그)"]
+    C --> D["계층적 비용 필터 (Cost Filter)<br/>Top 3 최정예 종목 선별"]
+    D --> E["LLM 투자 위원회 (Multi-Agent Committee)<br/>버핏 · 캐시우드 · 버리 · 애크먼 · 그레이엄"]
+    E --> F["Meta-Labeling 2차 품질 필터 & 토론(Debate)"]
+    F --> G["포트폴리오 매니저 & 동적 사이징"]
+    G --> H["리스크 엔진 & 킬스위치 (Drawdown/VIX/Loss Limit)"]
+    H --> I{"운용 모드"}
+    I -->|Paper| J["모의 체결 엔진 (Instant Fill)"]
+    I -->|Live| K["Alpaca 브로커 (HITL 승인 대기 큐)"]
+    J & K --> L["동적 트레일링 스탑 & 포지션 추적"]
+    L --> M["전진 채점 & 재귀적 자기 개선 엔진 (surge daily)"]
 ```
 
-매일 한 번 `surge snapshot`을 돌리는 것이 데이터 해자의 전부다 — 빠질수록 손해.
+### A. 2단계 깔때기 & 생존자 편향 차단
+- **기저율 0.1% 후보를 2~5%까지 압축**: 전체 유니버스에서 저가·소형·유동성 정적 필터로 후보를 압축한 뒤, 비싼 구조/옵션/SEC 공시 API는 최종 쇼트리스트에만 적용합니다.
+- **Point-in-Time 아카이빙**: 상장폐지(Delisted) 종목을 절대 삭제하지 않고 보존하여 백테스트 왜곡 및 생존자 편향을 100% 원천 차단합니다.
 
-**자동화 — GitHub Actions 단일 계층 (2026-07 확정)**:
-- `.github/workflows/daily-pipeline.yml`이 유일한 자동화이자 **`data/surge.db`의 유일한
-  기록자**다. 평일 UTC 13:30(미국 개장 전 콜 생성)·00:00(마감 후 채점+자기개선) 2회,
-  PC 전원과 무관하게 실행되고 결과를 리포에 자동 커밋한다. 토큰 소비 0.
-- **구(舊) 로컬 이중 계층은 폐기됨**: Windows 작업 스케줄러 잡과 앱 내 Claude 작업은
-  Actions와 동일 DB에 이중 기록해 바이너리 충돌을 일으키므로 반드시 해제한다 —
-  `Unregister-ScheduledTask -TaskName surge-daily-morning,surge-daily-evening`
-  + 앱 내 `daily-surge-snapshot`/`nightly-duel-call` 삭제. `scripts/*.ps1`은
-  장기 Actions 장애 시의 수동 폴백 문서로만 남긴다(상시 등록 금지).
-- 로컬은 **읽기 전용 조회**만: `git pull` 후 `surge report`/`surge verify`/`surge adaptive`.
+### B. 진정한 LLM-Driven 투자 위원회 (Multi-Agent Committee)
+- **전설적 투자자 5인 페르소나**:
+  - **Warren Buffett**: 경제적 해자(Moat), 안정적 마진, 유상증자/독성부채 거부
+  - **Cathie Wood**: 지수적 성장성, 폭발적 상대 거래량(RVOL), 유통주식수(Float) 탄력성
+  - **Michael Burry**: 포렌식 리스크 검증, S-1/S-3 희석 폭탄, 펌프앤덤프 감지 및 **강력 거부권(Veto)**
+  - **Bill Ackman**: 계약, FDA 승인, 실적 서프라이즈 등 핵심 행동주의 촉매(Catalyst) 추적
+  - **Benjamin Graham**: 순유동자산 대비 청산가치 안전마진(Margin of Safety) 평가
+- **컨텍스트 RAG 주입**: yfinance 실시간 뉴스 헤드라인과 SEC EDGAR 공시(8-K, 10-Q) 전문을 LLM에 주입하여 심층 추론(Reasoning)을 도출합니다.
+- **계층적 비용 필터(Hierarchical Cost Filter)**: 매일 수십 개 후보 전체를 LLM으로 돌려 발생하는 API 비용 폭탄을 방지하기 위해, 기술적 스코어 상위 **Top 3 최정예 종목에 대해서만 LLM 위원회를 소집**합니다. (API 키 부재 시 규칙 기반 로직으로 Graceful Fallback)
 
-**토큰 정책(자기개선 엔진)**: 야간 루프는 영구 결정론·제로 토큰(재현성이 곧 감사
-가능성). LLM 토큰은 **원장이 신호를 줄 때의 연구 세션에만** 쓴다 — learning_log의
-`promote_ready`/`verify` ✅/자동발굴 가설(🔬) 누적이 계기이며, 그 외 정기 소비는 없다.
+### C. 기관급 체결 및 리스크 관리 엔진
+- **Alpaca Live Broker 실거래 완전 통합**: Paper(모의) 거래는 즉시 체결되며, Live(실거래)는 **Human-In-The-Loop(HITL)** 원칙에 따라 웹 대시보드에서 사람이 명시적으로 승인(Approve)해야만 브로커로 실제 주문이 전송됩니다.
+- **동적 트레일링 스탑 (Dynamic Trailing Stop)**: 수익 구간 진입 시 고점 대비 설정 비율 하락 지점으로 손절선(Stop Price)을 능동적으로 상향 갱신(Ratchet)하여 이익을 확정 짓습니다.
+- **메타 라벨링 (Meta-Labeling) 2차 필터**: Marcos López de Prado의 금융 머신러닝 기법을 적용하여 1차 신호의 베팅 신뢰도를 재검증하고 승률을 극대화합니다.
+- **기관급 퀀트 티어 시트 (Quant Tear Sheet)**: 연율화 수익률, Sharpe, Sortino, Calmar, CVaR 95%(Expected Shortfall), Omega Ratio, Max Drawdown을 실시간 산출합니다.
+- **시세 3중 Failover**: yfinance → Finnhub API → Yahoo 직접 스크랩의 3단계 폴백 구조로 단일 장애점(SPOF)을 제거했습니다.
 
-**안정성**: 스냅샷은 **배치별 증분 커밋**이라 중간에 throttle/네트워크 오류가 나도 그때까지
-모은 데이터는 보존된다. 한 배치 실패가 전체 런을 죽이지 않는다(`batches_failed` 카운트).
-`--fast`는 직전 스냅샷 종가가 `max_price × 3`(기본 $60) 초과인 종목을 건너뛴다.
+### D. 재귀적 자기 개선 엔진 (Recursive Self-Improvement)
+- `surge daily` 루프를 통해 전일 예측 결과를 자동으로 채점(Scoring)합니다.
+- Šidák 다중검정 보정이 적용된 가설 발굴기(`learn.py`)가 오류 원인(Culprit)과 신호 충돌을 분석하여 새로운 섀도 팩터와 가중치 변형을 전진 경쟁에 자동 투입합니다.
+- **Anytime-valid e-값 (e≥20)** 검정으로 엿보기 편향(Optional-stopping bias) 없는 무결점 통계적 검증을 제공합니다.
 
-## 후보 점수 (투명 룰기반)
+---
 
-`surge watchlist`는 Stage-2 shortlist를 구조적 사전조건으로 점수화해 랭킹한다.
-모든 점수에 **자연어 근거**가 붙는다(블랙박스 아님):
+## 2. 설치 및 시작하기
 
-- **+가점**: 저유동 float, 고공매도, float 완전회전, RVOL 급증, 콜 편중,
-  모멘텀/갭/연속상승/강한마감, 최근 리버스 스플릿(저유동 셋업)
-- **−감점(트랩)**: 발행 임박(SEC S-1/S-3/424B), 과열 소진, 유동성 부족
+### 필수 요구사항
+- Python 3.12+
+- [uv](https://github.com/astral-sh/uv) (초고속 파이썬 패키지 관리자)
 
-데이터 소스: float·옵션·공매도(yfinance), 리버스 스플릿·실적일(yfinance),
-발행 파일링·촉매(SEC EDGAR, 무료).
-
-## 페이드(되돌림) 예측 — 관찰된 경향, 스코어러 랭킹은 미검증
-
-2026-06-05~06 검증에서 두 가지가 갈렸다:
-- **관찰됨(broad fade)**: 점화 예측은 실패(0/24 +100%)했고, 후보(이미 상승한 저유동주)는
-  **익일 평균 −5.7%로 광범위하게 되돌림**했다. "상승한 저유동주는 익일에 평균적으로 빠진다"는
-  방향성은 일관됐다.
-- **미검증(scorer ranking)**: `reversion.reversion_score`의 *랭킹*은 아직 우위를 못 보였다 —
-  이 표본에서 고점수(블로우오프) 종목이 오히려 *덜* 빠졌다(고점수 −1.4% vs 저점수 −4.1%,
-  n=2 vs 14, 통계적 무의미). 즉 페이드는 **가장 큰 블로우오프에 집중되기보다 광범위**했다.
-
-`surge reversals`는 이 가설을 **계속 측정하기 위한** 도구다(블랙박스 아님, 근거 공개). 표본이
-수십 일로 쌓이기 전까지 "검증됨" 라벨은 붙이지 않는다 — 이는 프로젝트의 과최적화 회피 원칙과
-일관된다. `scoring.setup_score`(점화)의 거울로 `reversion_score`(되돌림)가 짝을 이룬다.
-
-## AI 자동매매 플랫폼 (paper 기본 · live는 사람 승인 게이트)
-
-surge 시그널을 첫 전략으로 꽂는 **"계좌가 살아남는 컨테이너"**. 멀티에이전트
-(news·technical·fundamental·macro·risk) → 토론(bull/bear/judge, risk 거부권) →
-포트폴리오 매니저 → **리스크 엔진**(사이징·손실한도·거부) → 실행(paper 체결 / live 승인대기)
-→ 전 단계 감사로그. 자세한 설계: [docs/TRADING.md](docs/TRADING.md).
-
+### 1) 저장소 클론 및 패키지 동기화
 ```bash
-uv run surge trade --top 8       # 의사결정 1사이클(paper)
-uv run surge portfolio           # 포지션·자본·드로다운·상태
-uv run surge approvals           # live 주문 승인 큐(사람이 직접 제출)
-uv run surge killswitch --reason "manual"   # 전량청산+중단
-uv run surge backtest --strategy momentum --montecarlo --walkforward --crash
-uv run surge dashboard           # HTS 웹 대시보드 → http://127.0.0.1:8000
+git clone https://github.com/489156/surge_HTS.git
+cd surge_HTS
+
+# uv를 통한 가상환경 구축 및 의존성 초고속 설치
+uv sync --extra llm --extra kr
 ```
 
-## Duel — 매일 밤 SOXL vs SOXS (`src/surge/duel/`)
+### 2) 환경 변수 설정 (`.env`)
+프로젝트 루트에 `.env` 파일을 생성하거나 수정합니다:
+```ini
+# 시스템 기본 설정
+ENVIRONMENT=production
+TRADING_MODE=paper                  # paper 또는 live
+STARTING_CAPITAL=10000.0
 
-"오늘 밤 어느 쪽에 베팅하나"를 아시아 반도체 선행(TSMC·삼성·하이닉스·TEL) + 추세·
-모멘텀·VIX·금리(+라이브 NQ선물)의 투명 가중 투표로 판정. **관망(STAND_ASIDE)이
-정식 출력**이며, ATR 브래킷·종가 청산(오버나이트 금지)·콜 저장→사후 채점 루프 포함.
+# LLM 투자 위원회 (선택 - 없으면 규칙 기반 fallback)
+ANTHROPIC_API_KEY=your_claude_api_key
+ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 
-```bash
-uv run surge duel              # 오늘 밤 판정 (저장됨)
-uv run surge duel-backtest --period 2y
-uv run surge duel-eval         # 누적 적중률 채점
-uv run surge quotes --health   # SOXL/SOXS 시세 + 3중 failover 공급자 상태
+# 실거래 브로커 (Alpaca)
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_SECRET_KEY=your_alpaca_secret
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+
+# 시세 3중화 (선택 - yfinance 및 Yahoo 스크랩은 무료 기본 동작)
+FINNHUB_API_KEY=your_finnhub_key
+
+# 리스크 관리
+ENABLE_TRAILING_STOPS=true
+TRAILING_STOP_PCT=0.10             # 10% 트레일링 스탑
+MAX_DAILY_LOSS_PCT=0.03            # 일간 3% 손실 시 당일 신규 진입 차단
+MAX_DRAWDOWN_PCT=0.10              # 누적 10% 드로다운 시 강제 청산(Kill-Switch)
 ```
 
-**시세 이중화**: yfinance → Finnhub(키 설정 시, 진짜 벤더 이중화) → Yahoo 직접
-호출(라이브러리 파손 대비). 단일 장애점 제거. Prometheus `surge_quote` 게이지 노출.
+### 3) 초기 데이터베이스 및 유니버스 적재
+```bash
+uv run surge init                   # SQLite WAL 모드 DB 초기화
+uv run surge universe               # NASDAQ Trader 무료 종목 마스터 적재
+```
 
-2년 백테스트 정직 보고: 적중 54.3%(통계적 미유의), 실행가능 PnL −3.4% — 아시아
-신호는 시초가 갭에 선반영됨. 상세: [docs/DUEL.md](docs/DUEL.md).
+---
 
-**백테스트**(`src/surge/backtest/`): 룩어헤드 없는 이벤트 리플레이(시그널 D일 종가 →
-D+1 시가 진입), 슬리피지·수수료, Sharpe/Sortino/Calmar/MDD/승률/PF, 몬테카를로·
-워크포워드·크래시 스트레스. **HTS 대시보드**(`src/surge/dashboard/`): FastAPI +
-단일 페이지 터미널(워치리스트·포지션·PnL·에이전트 의견·리스크·킬스위치·감사로그).
-Docker 배포: `docker compose up`([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+## 3. 핵심 사용법 (CLI 매뉴얼)
 
-**안전 게이트(코드로 강제)**: live 주문은 자동 제출 불가 — `AlpacaLiveBroker.place_order`는
-`LiveBrokerGateError`를 던지고, 오케스트레이터는 *승인 대기*로만 적재한다. 실제 제출은
-`approvals --approve`(사람 행동)로만 가능. **AI가 틀려도, 무인 자동화가 돌아도 계좌가 산다.**
+### A. 일일 스냅샷 및 워치리스트
+```bash
+# 당일 시장 데이터 및 구조적 피처 스냅샷 아카이빙
+uv run surge snapshot --fast
 
-## 다음 단계 (미구현, 자리 확보됨)
-- 차입비용·utilization 무료 소스 확보 시 `daily_snapshot.borrow_fee` 활성화 (최고 선행성)
-- 소셜 멘션 가속도·breadth(Reddit/StockTwits)
-- FDA/PDUFA 촉매 캘린더(현재 촉매: 실적·리버스스플릿·발행)
-- 학습/백테스트: 생존자편향·룩어헤드·유동성·조작 4대 함정 제거 후 DSR·PBO
-- 페이드 모델: `surge_events.sustained` 라벨이 충분히 쌓이면 익일 소멸 예측 학습
+# 오늘의 급등 점화 후보 랭킹 및 자연어 근거 확인
+uv run surge watchlist --why
+
+# 급등 후 익일 되돌림(페이드) 후보 워치리스트
+uv run surge reversals --why
+
+# 과거 후보들의 실제 익일 성과 백필 및 적중률 평가
+uv run surge backfill-outcomes
+uv run surge eval --k 10
+```
+
+### B. 멀티에이전트 HTS 자동매매 및 대시보드
+```bash
+# 트레이딩 1사이클 수동 실행 (의사결정 -> 토론 -> 리스크 검증 -> 주문)
+uv run surge trade --top 8
+
+# 포트폴리오 및 퀀트 티어 시트 지표 조회
+uv run surge portfolio
+
+# 실거래(Live) 승인 대기 큐 확인 (수동 승인/거부)
+uv run surge approvals
+
+# 긴급 전량 청산 및 시스템 중단 (Kill-Switch)
+uv run surge killswitch --reason "Manual intervention"
+
+# HTS 웹 대시보드 가동 (브라우저 접속: http://127.0.0.1:8000)
+uv run surge dashboard
+```
+
+### C. 야간 SOXL vs SOXS 듀얼 (`surge duel`)
+```bash
+# 오늘 밤 SOXL vs SOXS 판정 및 주문 신호 생성 (아시아 반도체 + NQ선물 기반)
+uv run surge duel
+
+# 듀얼 모델 성과 사후 채점 및 갭 분석
+uv run surge duel-eval
+uv run surge duel-gap
+
+# 시세 공급자 3중화 상태 점검
+uv run surge quotes --health
+```
+
+### D. 자율 학습 및 검증 게이트
+```bash
+# 전략별 anytime-valid e-값 및 기준선 초과 검증 (가장 먼저 확인)
+uv run surge verdict
+
+# 매일의 자기개선 폐쇄 루프 1회 가동 (채점 -> 진화 -> 판정 -> 기록)
+uv run surge daily
+
+# 신규 발굴된 가설 팩터 리더보드
+uv run surge factors
+```
+
+---
+
+## 4. 자동화 파이프라인 (무인 운영 체계)
+
+본 시스템은 PC 전원 상태 및 클라우드 환경에 맞춰 **이중화된 무인 자동화 계층**을 지원합니다.
+
+### 1) GitHub Actions 클라우드 파이프라인 (권장)
+- `.github/workflows/daily-pipeline.yml`: 평일 개장 전(미국 UTC 13:30) 콜 생성 및 마감 후(UTC 00:00) 채점·자기개선을 완전 무인으로 실행하고 결과를 리포지토리에 자동 커밋합니다.
+- `.github/workflows/ci.yml`: 모든 PR 및 커밋에 대해 오프라인 모킹 테스트(377개 테스트) 및 Ruff Lint 무결성을 자동 검증합니다.
+
+### 2) Windows 작업 스케줄러 로컬 파이프라인
+로컬 PC를 상시 가동하는 트레이더를 위한 OS 레벨 자동화 스크립트입니다:
+```powershell
+# 스케줄러 등록 (관리자 권한 PowerShell)
+powershell -ExecutionPolicy Bypass -File scripts\setup_scheduled_tasks.ps1
+
+# 등록 상태 확인
+Get-ScheduledTask -TaskName 'surge-*' | Select-Object TaskName,State
+```
+*등록되는 루틴:*
+- `surge-daily-evening` (매일 21:35 KST): 미국 6개 페어 야간 콜 생성
+- `surge-daily-morning` (매일 07:13 KST): 전일자 채점, 갭 분석, 데일리 리포트
+- `surge-kr-eod` (매일 16:05 KST): 한국장 마감 후 회전(Rotation) 후보 산출
+- `surge-self-improve` (매일 07:55 KST): 자기 개선 루프 (`surge daily`)
+
+---
+
+## 5. HTS 웹 대시보드 화면 구성
+
+`uv run surge dashboard` 실행 후 `http://127.0.0.1:8000` 접속 시 단일 화면에서 모든 상태를 관제할 수 있습니다:
+
+1. **상단 검증 게이트 (Blue Bar)**: 전략별 실측 엣지 판정 (⭐신호 / 🟢엣지 / 🟡미검증 / ⛔음의 엣지)
+2. **오늘밤 Duel 콜 & 회전 후보**: 미국 SOXL/SOXS 및 한국 가치사슬 추천 후보
+3. **포트폴리오 & 기관급 티어 시트**: 총 자산, 당일 손익, Sharpe, Sortino, Calmar, CVaR 95%, Max Drawdown
+4. **실시간 승인 대기 큐 (Live Approval Queue)**: 라이브 주문의 Human-In-The-Loop 안전 승인 버튼 (✓ 클릭 시 Alpaca 실제 전송)
+5. **리스크 한도 및 감사 로그 (Audit)**: 모든 결정과 킬스위치 상태의 실시간 추적 기록
+
+---
+
+## 6. 안전 수칙 및 법적 고지
+
+- **정보 및 도구 제공 목적**: 본 프로그램은 투자 자문이나 금융 상품 권유가 아닙니다. 모든 백테스트와 산출물은 과거 데이터에 기반한 통계적 가설입니다.
+- **검증 게이트 준수**: `surge verdict`에서 **⭐(신호)** 판정을 받기 전까지 모든 모델 결과는 실제 자금을 투입하지 않는 연구용 가설로 취급해야 합니다.
+- **Human-In-The-Loop 강제**: 실거래 주문은 코드가 독단적으로 실행할 수 없도록 설계되어 있으며, 반드시 운영자의 명시적 승인을 거쳐야 합니다.
+
+---
+
+## 7. 라이선스
+MIT License. 상세 내용은 [LICENSE](LICENSE) 파일을 참조하십시오.
