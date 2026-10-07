@@ -560,6 +560,23 @@ def decide_approval(order_id: str, action: str) -> dict:
     if row["status"] != "pending":
         raise HTTPException(409, f"approval already {row['status']}")
     store.set_approval(order_id, "approved" if action == "approve" else "rejected")
-    store.update_order_status(order_id,
-                              "submitted" if action == "approve" else "cancelled")
+    
+    if action == "approve":
+        try:
+            from ..trading.brokers import make_broker
+            order = store.get_order(order_id)
+            if order:
+                broker = make_broker()
+                if hasattr(broker, "submit_approved"):
+                    resp = broker.submit_approved(order)
+                    store.update_order_status(order_id, "submitted", broker_order_id=resp.get("id"))
+                else:
+                    store.update_order_status(order_id, "submitted")
+        except Exception as e:
+            store.set_approval(order_id, "failed", note=str(e))
+            store.update_order_status(order_id, "error")
+            return {"order_id": order_id, "action": action, "error": str(e)}
+    else:
+        store.update_order_status(order_id, "cancelled")
+        
     return {"order_id": order_id, "action": action}

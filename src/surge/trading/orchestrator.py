@@ -89,6 +89,21 @@ class TradingEngine:
             last = last_prices.get(p.symbol)
             if last is None:
                 continue
+                
+            # Dynamic Trailing Stop
+            if settings.enable_trailing_stops:
+                potential_stop = last * (1 - settings.trailing_stop_pct)
+                if p.stop_price is None or potential_stop > p.stop_price:
+                    # Do not trail stop if it's below average price and we're not profitable yet,
+                    # or if we want strict trailing, we can just do it always.
+                    # Let's only trail if we're profitable to avoid tightening too early,
+                    # OR just strictly trail from highest high.
+                    if p.stop_price is None or (last > p.avg_price and potential_stop > p.stop_price):
+                        p.stop_price = potential_stop
+                        store.upsert_position(p)
+                        audit("execution", "trailing_stop_updated", symbol=p.symbol,
+                              payload={"last": last, "new_stop": potential_stop})
+
             if p.stop_price and last <= p.stop_price:
                 audit("execution", "stop_loss", symbol=p.symbol,
                       payload={"last": last, "stop": p.stop_price})

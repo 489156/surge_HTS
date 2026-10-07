@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     per_trade_risk: float = 0.005          # 0.5% (half-Kelly-ish conservative)
     default_stop_pct: float = 0.10         # 10% stop if none supplied
     default_target_pct: float = 0.20       # 20% take-profit if none supplied
+    
+    # Trailing stops
+    enable_trailing_stops: bool = True
+    trailing_stop_pct: float = 0.10        # e.g., trail 10% behind high
 
     # Execution simulation (paper)
     commission_per_share: float = 0.0

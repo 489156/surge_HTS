@@ -125,6 +125,30 @@ def insert_order(o: Order) -> None:
         )
 
 
+def get_order(order_id: str) -> Order | None:
+    from .models import OrderType, Side, OrderStatus
+    with connect() as conn:
+        r = conn.execute("SELECT * FROM orders WHERE order_id=?", (order_id,)).fetchone()
+    if not r:
+        return None
+    return Order(
+        order_id=r["order_id"],
+        ts=r["ts"],
+        mode=TradingMode(r["mode"]),
+        symbol=r["symbol"],
+        side=Side(r["side"]),
+        qty=r["qty"],
+        order_type=OrderType(r["order_type"]),
+        limit_price=r["limit_price"],
+        stop_price=r["stop_price"],
+        tif=r["tif"],
+        status=OrderStatus(r["status"]),
+        decision_id=r["decision_id"],
+        reason=r["reason"],
+        broker_order_id=r["broker_order_id"],
+    )
+
+
 def update_order_status(order_id: str, status: str,
                         broker_order_id: str | None = None) -> None:
     with connect() as conn:
