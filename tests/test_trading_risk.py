@@ -78,3 +78,13 @@ def test_risk_state_loss_limits(db):
     status, m = eng.risk_state({"XYZ": 88.0})  # 1000*88 + 6k = 94k → -6%
     assert status == RiskStatus.LIQUIDATE
     assert round(m["weekly"], 3) == -0.06
+
+
+def test_position_size_dynamic_size_pct(db):
+    eng = RiskEngine(MODE)
+    # Default 5% cap yields 500 shares @ $10
+    full_qty = eng.position_size(100_000, 10.0, 9.99)
+    # Dynamic 2.5% cap (half-kelly or debate half-size) yields 250 shares
+    half_qty = eng.position_size(100_000, 10.0, 9.99, size_pct=0.025)
+    assert half_qty == int(0.025 * 100_000 / 10.0)
+    assert half_qty == full_qty // 2

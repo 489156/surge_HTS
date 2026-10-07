@@ -22,15 +22,20 @@ class RiskEngine:
         self.mode = mode
 
     # ── Position sizing ──────────────────────────────────────────────────────
-    def position_size(self, equity: float, entry: float, stop: float) -> int:
+    def position_size(self, equity: float, entry: float, stop: float,
+                      size_pct: float | None = None) -> int:
         """Shares such that (entry-stop) loss ≈ per_trade_risk × equity, capped
-        by max_position_pct and rounded down to whole shares."""
+        by max_position_pct (or dynamic size_pct) and rounded down to whole shares."""
         if entry <= 0:
             return 0
         per_share_risk = max(entry - stop, entry * 0.01)  # floor to avoid div→inf
-        risk_budget = settings.per_trade_risk * equity
+        effective_cap = size_pct if (size_pct is not None and size_pct > 0) else settings.max_position_pct
+        effective_cap = min(settings.max_position_pct, max(0.0, effective_cap))
+
+        ratio = (effective_cap / settings.max_position_pct) if settings.max_position_pct > 0 else 1.0
+        risk_budget = settings.per_trade_risk * equity * ratio
         qty_by_risk = risk_budget / per_share_risk
-        qty_by_cap = (settings.max_position_pct * equity) / entry
+        qty_by_cap = (effective_cap * equity) / entry
         return max(0, int(math.floor(min(qty_by_risk, qty_by_cap))))
 
     # ── Portfolio risk helpers ───────────────────────────────────────────────

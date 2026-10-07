@@ -98,7 +98,7 @@ class ExecutionEngine:
 
         # BUY — size via risk engine (NOT from raw agent output)
         stop = decision.stop_price or ref_price * (1 - settings.default_stop_pct)
-        qty = self.risk.position_size(equity, ref_price, stop)
+        qty = self.risk.position_size(equity, ref_price, stop, size_pct=decision.size_pct)
         rd = self.risk.assess(
             symbol=sym, side=Side.BUY, qty=qty, entry=ref_price, stop=stop,
             positions=positions, equity=equity, status=status,

@@ -75,7 +75,8 @@ def calculate_quant_tear_sheet(mode: TradingMode = TradingMode.PAPER) -> dict[st
     # 4. Calmar Ratio (Annualized Return / |Max Drawdown|)
     # Approximate annualized return
     n_days = max(1, len(equities))
-    cagr = float((1.0 + total_return) ** (252.0 / max(10, n_days)) - 1.0)
+    base_for_cagr = max(1e-4, 1.0 + total_return)
+    cagr = float(base_for_cagr ** (252.0 / max(10, n_days)) - 1.0)
     calmar = float(cagr / abs(max_dd)) if abs(max_dd) > 1e-4 else (cagr if cagr > 0 else 0.0)
 
     # 5. Conditional Value at Risk (CVaR 95% / Expected Shortfall)
