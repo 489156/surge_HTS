@@ -104,3 +104,46 @@ def test_update_sustained(db, monkeypatch):
                for r in conn.execute("SELECT symbol, sustained FROM surge_events")}
     assert res["FADE"] == 0
     assert res["HOLD"] == 1
+
+
+def test_dual_track_routing_pre_catalyst_vs_reversion_fade(db, monkeypatch):
+    dates = pd.date_range("2026-05-01", periods=25, freq="B").strftime("%Y-%m-%d").tolist()
+
+    def make_df(sym, last_close, last_open, last_hi, last_lo, last_vol):
+        rows = []
+        for i, d in enumerate(dates):
+            if i < len(dates) - 1:
+                rows.append({"symbol": sym, "date": d, "open": 10.0, "high": 10.2,
+                             "low": 9.8, "close": 10.0, "volume": 100_000})
+            else:
+                rows.append({"symbol": sym, "date": d, "open": last_open, "high": last_hi,
+                             "low": last_lo, "close": last_close, "volume": last_vol})
+        return pd.DataFrame(rows)
+
+    def fake_download(syms, period="60d"):
+        return pd.concat([
+            make_df("COIL", 10.2, 10.0, 10.25, 9.95, 200_000),  # +2%, rvol=2, tight range
+            make_df("PUMP", 16.0, 16.0, 18.0, 15.0, 1_500_000), # +60%, overheated
+        ], ignore_index=True)
+
+    monkeypatch.setattr(pipeline.market, "download_ohlcv", fake_download)
+    monkeypatch.setattr(
+        pipeline.market, "fetch_structural",
+        lambda s: {"shares_float": 5_000_000, "short_pct_float": 0.25} if s == "COIL" else {},
+    )
+    monkeypatch.setattr(pipeline.market, "fetch_options", lambda s: {"opt_has_chain": 0})
+    monkeypatch.setattr(
+        pipeline.market, "fetch_corporate",
+        lambda s, **k: {"recent_rsplit": 0, "catalysts": []},
+    )
+    monkeypatch.setattr(pipeline.sec, "load_cik_map", lambda *a, **k: {})
+    monkeypatch.setattr(
+        pipeline.sec, "assess_symbol",
+        lambda s, **k: {"pending_offering": 0, "catalysts": []},
+    )
+
+    res = pipeline._process_batch(["COIL", "PUMP"], "60d")
+    by_sym = {c["symbol"]: c for c in res["candidate_rows"]}
+    assert by_sym["COIL"]["strategy_type"] == "pre_catalyst"
+    assert by_sym["PUMP"]["strategy_type"] == "reversion_fade"
+    assert len(by_sym) == len(res["candidate_rows"])  # mutually exclusive per symbol

@@ -36,6 +36,8 @@ jobs:
       SURGE_NAVER_CLIENT_ID:      ${{ secrets.SURGE_NAVER_CLIENT_ID }}
       SURGE_NAVER_CLIENT_SECRET:  ${{ secrets.SURGE_NAVER_CLIENT_SECRET }}
       SURGE_OPENDART_API_KEY:     ${{ secrets.SURGE_OPENDART_API_KEY }}
+      SURGE_KRX_ID:               ${{ secrets.SURGE_KRX_ID }}
+      SURGE_KRX_PW:               ${{ secrets.SURGE_KRX_PW }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,6 +91,7 @@ jobs:
           surge kr-factors --backfill --days 45   # KR 섀도 팩터 원장 전진+채점
                                    # (검색급등/policy_tagged가 +10%/T+5를 선별하는가;
                                    # 로컬 루틴 은퇴 후 파이프라인이 유일 갱신자)
+          surge fade             # 급등 되돌림(reversion_fade) 트랙 갱신
           surge daily            # score → evolve → judge → record (learning_log)
           surge prune            # trim no-edge surge-screener archive + VACUUM
                                  # (caps DB growth that hit the 100MB push wall)

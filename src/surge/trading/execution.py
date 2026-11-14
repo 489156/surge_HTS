@@ -8,6 +8,8 @@ submitted. Paper orders fill synchronously through the PaperBroker.
 
 from __future__ import annotations
 
+import threading
+
 from loguru import logger
 
 from ..config import settings
@@ -27,6 +29,8 @@ from .models import (
 )
 from .risk import RiskEngine
 
+_FILL_LOCK = threading.RLock()
+
 
 class ExecutionEngine:
     def __init__(self, mode: TradingMode, broker: Broker | None = None,
@@ -37,38 +41,11 @@ class ExecutionEngine:
 
     # ── Portfolio bookkeeping ────────────────────────────────────────────────
     def apply_fill(self, fill: Fill) -> None:
-        """Update position + cash + account snapshot from a fill. Single source
-        of truth for portfolio state."""
-        pos = store.get_position(fill.symbol, self.mode)
-        cash = store.latest_cash(self.mode)
-
-        if fill.side == Side.BUY:
-            cash -= fill.qty * fill.price + fill.commission
-            if pos:
-                new_qty = pos.qty + fill.qty
-                pos.avg_price = (pos.qty * pos.avg_price + fill.qty * fill.price) / new_qty
-                pos.qty = new_qty
-            else:
-                pos = Position(symbol=fill.symbol, mode=self.mode, qty=fill.qty,
-                               avg_price=fill.price)
-            store.upsert_position(pos)
-        else:  # SELL — reduce/close
-            if not pos:
+        """Update position + cash + account snapshot atomically from a fill."""
+        with _FILL_LOCK:
+            if not store.apply_fill_atomic(self.mode, fill):
                 logger.warning("sell with no position {}", fill.symbol)
                 return
-            sold = min(fill.qty, pos.qty)
-            pos.realized_pnl += (fill.price - pos.avg_price) * sold
-            pos.qty -= sold
-            cash += sold * fill.price - fill.commission
-            if pos.qty <= 1e-9:
-                pos.status = "closed"
-            store.upsert_position(pos)
-
-        store.insert_fill(fill)
-        # recompute equity from open positions at their avg cost (conservative)
-        positions = store.get_positions(self.mode)
-        equity = cash + sum(p.qty * p.avg_price for p in positions)
-        store.save_account(self.mode, cash=cash, equity=equity)
         audit("execution", "fill", symbol=fill.symbol,
               payload={"qty": fill.qty, "price": fill.price, "side": fill.side.value})
 
@@ -145,27 +122,28 @@ class ExecutionEngine:
                 "price": fill.price}
 
     def close_position(self, symbol: str, ref_price: float, reason: str = "") -> dict:
-        pos = store.get_position(symbol, self.mode)
-        if not pos or pos.qty <= 0:
-            return {"symbol": symbol, "result": "no_position"}
-        order = Order(mode=self.mode, symbol=symbol, side=Side.SELL, qty=pos.qty,
-                      order_type=OrderType.MARKET, reason=reason)
-        if self.mode == TradingMode.LIVE:
-            order.status = OrderStatus.PENDING_APPROVAL
+        with _FILL_LOCK:
+            pos = store.get_position(symbol, self.mode)
+            if not pos or pos.qty <= 0:
+                return {"symbol": symbol, "result": "no_position"}
+            order = Order(mode=self.mode, symbol=symbol, side=Side.SELL, qty=pos.qty,
+                          order_type=OrderType.MARKET, reason=reason)
+            if self.mode == TradingMode.LIVE:
+                order.status = OrderStatus.PENDING_APPROVAL
+                store.insert_order(order)
+                store.create_approval(order.order_id)
+                audit("execution", "staged_exit_for_approval", symbol=symbol,
+                      payload={"order_id": order.order_id})
+                return {"symbol": symbol, "result": "pending_approval"}
             store.insert_order(order)
-            store.create_approval(order.order_id)
-            audit("execution", "staged_exit_for_approval", symbol=symbol,
-                  payload={"order_id": order.order_id})
-            return {"symbol": symbol, "result": "pending_approval"}
-        store.insert_order(order)
-        fill = self.broker.place_order(order, ref_price)
-        if not fill:
-            store.update_order_status(order.order_id, OrderStatus.REJECTED.value)
-            return {"symbol": symbol, "result": "not_filled"}
-        self.apply_fill(fill)
-        store.update_order_status(order.order_id, OrderStatus.FILLED.value)
-        return {"symbol": symbol, "result": "closed", "qty": fill.qty,
-                "price": fill.price}
+            fill = self.broker.place_order(order, ref_price)
+            if not fill:
+                store.update_order_status(order.order_id, OrderStatus.REJECTED.value)
+                return {"symbol": symbol, "result": "not_filled"}
+            self.apply_fill(fill)
+            store.update_order_status(order.order_id, OrderStatus.FILLED.value)
+            return {"symbol": symbol, "result": "closed", "qty": fill.qty,
+                    "price": fill.price}
 
     def _reject(self, decision: Decision, reason: str) -> dict:
         audit("execution", "rejected", symbol=decision.symbol,

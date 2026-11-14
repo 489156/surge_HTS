@@ -49,7 +49,7 @@ class TechnicalAgent(Agent):
         trap = ctx.get("trap") or {}
         if not snap:
             return self._op(symbol, 50, 10, "no price data")
-        setup, reasons = scoring.setup_score(snap, trap)
+        setup, reasons = scoring.setup_score(snap, trap, catalysts=ctx.get("catalysts"))
         score = 50 + setup * 5          # setup ~0..12 → 50..110 (capped)
         has_struct = bool(snap.get("shares_float")) and bool(snap.get("rvol"))
         confidence = 70 if has_struct else 40

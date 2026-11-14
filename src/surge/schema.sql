@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS surge_events (
 CREATE TABLE IF NOT EXISTS candidates (
     symbol         TEXT NOT NULL,
     snapshot_date  TEXT NOT NULL,
+    strategy_type  TEXT NOT NULL DEFAULT 'pre_catalyst',
     score          REAL NOT NULL,
     reasons        TEXT,            -- JSON list of plain-language drivers
     pct_change     REAL,
@@ -128,6 +129,8 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_cand_date_score
     ON candidates(snapshot_date, score DESC);
+CREATE INDEX IF NOT EXISTS idx_cand_type_date
+    ON candidates(strategy_type, snapshot_date, score DESC);
 
 -- ── Candidate outcomes — realized next-day result of each prediction ────────
 -- The honest measurement loop: did the watchlist's candidates actually move?
@@ -135,6 +138,7 @@ CREATE INDEX IF NOT EXISTS idx_cand_date_score
 CREATE TABLE IF NOT EXISTS candidate_outcomes (
     symbol         TEXT NOT NULL,
     snapshot_date  TEXT NOT NULL,   -- the prediction date (candidate's date)
+    strategy_type  TEXT NOT NULL DEFAULT 'pre_catalyst',
     score          REAL,            -- the score it was predicted with
     next_date      TEXT,            -- realized next trading day
     cand_close     REAL,            -- candidate-day close (the base)
@@ -301,6 +305,7 @@ CREATE TABLE IF NOT EXISTS duel_decisions (
     reasons       TEXT,                  -- human-readable component lines (JSON)
     components    TEXT,                  -- structured [{name,value,weight}] JSON
     gap_guard     REAL,                  -- cancel-entry gap threshold (return units)
+    atr_pct       REAL,                  -- entry-leg ATR% used for stop/ratchet
     model         TEXT DEFAULT 'champion', -- engine that produced the call
     forced        INTEGER DEFAULT 0,       -- mandatory-pick override (would have abstained)
     -- realized outcome (filled by duel-eval after the session)

@@ -56,6 +56,10 @@ PAIRS: dict[str, dict] = {
     "fas_faz": {
         "id": "fas_faz", "bull": "FAS", "bear": "FAZ",
         "underlying": "XLF", "name": "금융 3x",
+        # DEACTIVATED 2026-11-14: worst active pair over 86 calls (47.7% hit,
+        # -22.1% cumulative) — Asia semiconductor/US-tech-beta leads lack causal
+        # transfer to US financials; kept in registry for historical archive.
+        "active": False,
     },
     # ── single-stock exception (see module docstring for the screening that
     # justified it): NVDA is both leg AND already the existing baskets' leader ──

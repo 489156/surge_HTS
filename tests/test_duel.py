@@ -400,3 +400,157 @@ def test_archive_and_offline_roundtrip(tmp_path, monkeypatch):
     bt = dbt.run(frames=off)
     assert bt["n_traded"] > 10
     assert bt["accuracy"] >= 0.9
+
+
+def test_eval_persists_atr_ratchet_and_defers_lagging_bar(tmp_path, monkeypatch):
+    db = tmp_path / "r.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_ratchet_atr", 0.5)
+
+    frames = _frames(n=80, lead=+1)
+    # Last session triggers ratchet (high reaches +10% >= trigger) and then reverses to low <= open
+    last = frames["SOXX"]["date"].iloc[-1]
+    d = dlive.tonight(frames=frames, with_futures=False, session_date=last)
+    assert d.side == "SOXL" and d.atr_pct
+
+    tally = dlive.eval_outcomes(frames=frames)
+    assert tally["evaluated"] == 1
+    with connect(db) as conn:
+        row = conn.execute("SELECT atr_pct, exit_reason FROM duel_decisions WHERE decision_date=?", (last,)).fetchone()
+    assert row["atr_pct"] == pytest.approx(d.atr_pct, abs=1e-5)
+    assert row["exit_reason"] == "ratchet_stop"
+
+    # Lagging bar: decision_date is past today, yet AFTER latest frame date → stay NULL for retry
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO duel_decisions (pair, decision_date, side, score, captured_at) "
+            "VALUES ('soxl_soxs', '2026-06-01', 'SOXL', 0.3, 'x')"
+        )
+    dlive.eval_outcomes(frames=frames)
+    with connect(db) as conn:
+        lag_row = conn.execute(
+            "SELECT evaluated_at FROM duel_decisions WHERE decision_date='2026-06-01'"
+        ).fetchone()
+    assert lag_row["evaluated_at"] is None
+
+
+def test_fas_faz_deactivated_from_active_pairs():
+    from surge.duel.pairs import PAIRS, active_pair_ids
+
+    assert "fas_faz" in PAIRS
+    assert "fas_faz" not in active_pair_ids()
+
+
+def test_vix9d_fallback_and_options_context(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+    from surge.db import upsert as db_upsert
+    from surge.duel import data as ddata, factors as dfac
+
+    db = tmp_path / "opt.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+
+    start = date(2026, 6, 1)
+    opt_rows = []
+    for i in range(10):
+        d = (start + timedelta(days=i)).isoformat()
+        opt_rows.append({
+            "symbol": "SOXX", "date": d, "atm_iv": 0.30,
+            "pc_oi_ratio": 0.8 + i * 0.02, "pc_vol_ratio": 0.9, "captured_at": "x",
+        })
+    opt_rows.append({
+        "symbol": "SOXX", "date": "2026-06-20", "atm_iv": 0.99,
+        "pc_oi_ratio": 3.5, "pc_vol_ratio": 2.0, "captured_at": "x",
+    })
+    with connect(db) as conn:
+        db_upsert(conn, "options_snapshots", opt_rows)
+
+    ctx_opt = ddata.latest_options_context("SOXX", "2026-06-20")
+    assert ctx_opt["opt_pc_oi"] == pytest.approx(0.98)  # leak-safe: < before_date
+    assert ctx_opt.get("opt_pc_oi_z") is not None
+    assert dfac._opt_pc_contrarian({"opt_pc_oi": 1.4}) > 0
+
+    dates = pd.date_range("2026-03-01", periods=60, freq="B").strftime("%Y-%m-%d").tolist()
+    soxx_df = pd.DataFrame({
+        "open": [100.0 + i * 0.2 for i in range(60)],
+        "high": [101.0 + i * 0.2 for i in range(60)],
+        "low": [99.0 + i * 0.2 for i in range(60)],
+        "close": [100.5 + i * 0.2 for i in range(60)],
+        "volume": [1_000_000] * 60,
+    }, index=dates)
+    vix9d_df = pd.DataFrame({
+        "open": [19.0] * 60, "high": [19.5] * 60, "low": [18.5] * 60,
+        "close": [19.0 + (i % 3) * 0.5 for i in range(60)], "volume": [0] * 60,
+    }, index=dates)
+    prep = ddata.prepare({"SOXX": soxx_df, "vix9d": vix9d_df})
+    lctx = ddata.latest_context(prep, "2026-06-01")
+    hctx = ddata.context_for(prep, dates[-1])
+    assert lctx is not None and lctx["vix_level"] is not None
+    assert hctx is not None and hctx["vix_level"] is not None
+
+
+def test_simulate_bracket_intraday_chronological():
+    bars_target_first = [
+        (10.0, 10.6, 9.9, 10.5),  # hits target=10.5 first
+        (10.5, 10.5, 9.4, 9.5),   # later drops through stop=9.5
+    ]
+    px1, r1 = dbt.simulate_bracket_intraday(bars_target_first, stop=9.5, target=10.5, slip_bps=0)
+    assert r1 == "target" and px1 == pytest.approx(10.5)
+
+    bars_stop_first = [
+        (10.0, 10.2, 9.4, 9.6),   # hits stop=9.5 first
+        (9.6, 10.7, 9.6, 10.6),   # later bounces past target=10.5
+    ]
+    px2, r2 = dbt.simulate_bracket_intraday(bars_stop_first, stop=9.5, target=10.5, slip_bps=0)
+    assert r2 == "stop" and px2 == pytest.approx(9.5)
+
+
+def test_eval_outcomes_uses_intraday_for_recent_calls(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+    from surge.db import upsert as db_upsert
+    from surge.duel import data as ddata
+
+    db = tmp_path / "intra.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_slippage_bps", 0.0)
+    monkeypatch.setattr(settings, "duel_ratchet_atr", 0.0)
+
+    idx = pd.bdate_range(end=date.today() - timedelta(days=2), periods=65).strftime("%Y-%m-%d").tolist()
+    d_recent = idx[-1]
+    base_df = pd.DataFrame({
+        "open": [10.0] * 65, "high": [10.2] * 64 + [11.0],
+        "low": [9.8] * 64 + [9.0], "close": [10.0] * 64 + [10.2],
+        "volume": [100_000] * 65,
+    }, index=idx)
+    raw = {"SOXX": base_df.copy(), "SOXL": base_df.copy(), "SOXS": base_df.copy(), "SPY": base_df.copy()}
+
+    with connect(db) as conn:
+        db_upsert(conn, "duel_decisions", [{
+            "pair": "soxl_soxs", "decision_date": d_recent, "side": "SOXL",
+            "score": 0.4, "conviction": 0.4, "size_factor": 1.0,
+            "entry_ref": 10.0, "stop_price": 9.5, "target_price": 10.5,
+            "captured_at": "x",
+        }])
+
+    monkeypatch.setattr(ddata, "fetch_frames", lambda period, pair, shared=None: raw)
+    # 15m intraday bars: target=10.5 hits on bar 1 before stop=9.5 hits on bar 3
+    monkeypatch.setattr(
+        dlive, "_intraday_session_map",
+        lambda sides, dates: {("SOXL", d_recent): [
+            (10.0, 10.6, 9.9, 10.5),
+            (10.5, 10.5, 10.1, 10.2),
+            (10.2, 10.2, 9.4, 9.5),
+            (9.5, 9.8, 9.4, 9.7),
+        ]},
+    )
+    dlive.eval_outcomes()
+    with connect(db) as conn:
+        row = conn.execute(
+            "SELECT exit_reason, exit_fill, correct FROM duel_decisions WHERE decision_date=?",
+            (d_recent,),
+        ).fetchone()
+    assert row["exit_reason"] == "target"
+    assert row["exit_fill"] == pytest.approx(10.5)
+    assert row["correct"] == 1

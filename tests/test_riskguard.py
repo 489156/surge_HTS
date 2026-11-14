@@ -122,6 +122,7 @@ def test_mandatory_pick_noop_when_a_call_exists(tmp_path, monkeypatch):
     db = tmp_path / "n.db"
     init_db(db)
     monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_mandatory_pick", True)
     live_call = DuelDecision(date="d", pair_id="soxl_soxs", side="SOXL",
                              score=0.4, conviction=0.4, size_factor=1.0,
                              size_pct=0.1)
@@ -136,6 +137,7 @@ def test_mandatory_pick_declines_all_crisis(tmp_path, monkeypatch):
     db = tmp_path / "c.db"
     init_db(db)
     monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "duel_mandatory_pick", True)
     crisis = DuelDecision(date="d", pair_id="soxl_soxs", side="STAND_ASIDE",
                           score=0.3, conviction=0.3, size_factor=0.0,
                           size_pct=0.0,

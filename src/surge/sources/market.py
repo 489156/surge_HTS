@@ -19,9 +19,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
 def download_ohlcv(symbols: list[str], period: str = "60d",
                    start: str | None = None, end: str | None = None,
+                   interval: str = "1d",
                    ) -> pd.DataFrame:
-    """Batch daily OHLCV for many symbols. Returns a tidy long DataFrame:
-    columns = [symbol, date, open, high, low, close, volume].
+    """Batch OHLCV (daily or intraday) for many symbols. Returns a tidy long
+    DataFrame: columns = [symbol, date, open, high, low, close, volume].
 
     `period` uses yfinance's enumerated windows; pass `start` (ISO date) instead
     when you need an exact range — e.g. realized-outcome backfill must fetch FROM
@@ -34,7 +35,7 @@ def download_ohlcv(symbols: list[str], period: str = "60d",
           else {"period": period})
     raw = yf.download(
         tickers=" ".join(symbols),
-        interval="1d",
+        interval=interval,
         group_by="ticker",
         auto_adjust=False,
         threads=True,
@@ -65,10 +66,23 @@ def download_ohlcv(symbols: list[str], period: str = "60d",
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True)
     out.columns = [str(c).lower() for c in out.columns]
-    out = out.rename(columns={"date": "date"})
+    # Intraday bars return index named Datetime -> "datetime" after lowercasing
+    out = out.rename(columns={"datetime": "date", "index": "date"})
     keep = ["symbol", "date", "open", "high", "low", "close", "volume"]
     out = out[[c for c in keep if c in out.columns]].dropna(subset=["close"])
     return out
+
+
+def fetch_intraday(symbols: list[str], start: str, end: str | None = None,
+                   interval: str = "15m") -> pd.DataFrame:
+    """Degrade-safe intraday bar fetch (returns empty outside vendor window)."""
+    if not symbols:
+        return pd.DataFrame()
+    try:
+        return download_ohlcv(symbols, start=start, end=end, interval=interval)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("intraday fetch failed ({}): {}", interval, exc)
+        return pd.DataFrame()
 
 
 def fetch_structural(symbol: str) -> dict[str, Any]:

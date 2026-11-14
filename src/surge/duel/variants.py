@@ -119,12 +119,19 @@ def set_active(name: str) -> None:
             "promoted by setting SURGE_DUEL_USE_ADAPTIVE=1 (human gate; a "
             "non-base config wins by editing CONFIGS['adaptive']; see "
             "duel/adaptive.py)")
-    if name not in VARIANTS:
-        raise KeyError(f"unknown variant '{name}' (choices: {list(VARIANTS)})")
+    pool = all_variants()
+    if name not in pool:
+        raise KeyError(f"unknown variant '{name}' (choices: {list(pool)})")
+    prev = active_variant_name()
     now = utc_now()
     with connect() as conn:
-        for k, v in (("active_variant", name),
-                     ("active_multipliers", json.dumps(VARIANTS[name]))):
+        items = [
+            ("active_variant", name),
+            ("active_multipliers", json.dumps(pool[name])),
+        ]
+        if prev != name:
+            items.append(("previous_variant", prev))
+        for k, v in items:
             conn.execute(
                 "INSERT INTO model_state (key, value, updated_at) VALUES (?,?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
@@ -281,3 +288,67 @@ def leaderboard() -> dict:
             "baseline": base_p, "ranked": ranked, "recommend": recommend,
             "window": _recent_acc(active_variant_name(), min_n),
             "discovered": list(learn.discovered_variants())}
+
+
+def _trailing_lag(variant: str, window: int, margin: float) -> dict | None:
+    """Return lag stats if `variant` trails champion or baseline over recent `window`."""
+    if window <= 0 or variant == "champion":
+        return None
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT a.correct a_ok, c.correct c_ok, a.label lab "
+            "FROM duel_variants a "
+            "JOIN duel_variants c ON c.pair=a.pair AND c.decision_date=a.decision_date "
+            "WHERE a.variant=? AND c.variant='champion' "
+            "AND a.evaluated_at IS NOT NULL AND c.evaluated_at IS NOT NULL "
+            "AND a.correct IS NOT NULL AND c.correct IS NOT NULL "
+            "ORDER BY a.decision_date DESC LIMIT ?",
+            (variant, window),
+        ).fetchall()
+    if len(rows) < window:
+        return None
+    a_acc = sum(r["a_ok"] for r in rows) / len(rows)
+    c_acc = sum(r["c_ok"] for r in rows) / len(rows)
+    up = sum(1 for r in rows if (r["lab"] or 0) > 0)
+    b_acc = max(up, len(rows) - up) / len(rows)
+    if a_acc < c_acc - margin or a_acc < b_acc - margin:
+        return {
+            "n": len(rows), "active_acc": round(a_acc, 4),
+            "champ_acc": round(c_acc, 4), "base_acc": round(b_acc, 4),
+        }
+    return None
+
+
+def auto_manage(min_n: int | None = None) -> dict:
+    """Guarded self-evolution: roll back a decaying active variant or auto-promote
+    a statistically verified challenger (both champion & baseline surpassed)."""
+    from ..config import settings
+
+    active = active_variant_name()
+    w = settings.variant_rollback_window
+    margin = settings.variant_rollback_margin
+    if active != "champion":
+        lag = _trailing_lag(active, w, margin)
+        if lag:
+            set_active("champion")
+            return {"action": "rollback", "from": active, "to": "champion", **lag}
+
+    if not settings.variant_auto_promote:
+        return {"action": "noop", "active": active}
+
+    floor = min_n if min_n is not None else settings.variant_auto_min_n
+    lb = leaderboard()
+    rec = lb.get("recommend")
+    if (
+        rec
+        and rec["variant"] != active
+        and rec["n"] >= floor
+        and not _trailing_lag(rec["variant"], w, margin)
+    ):
+        set_active(rec["variant"])
+        return {
+            "action": "promote", "from": active, "to": rec["variant"],
+            "n": rec["n"], "acc": rec["acc"], "champ_acc": rec["champ_acc"],
+            "z": rec["z"], "z_base": rec.get("z_base"),
+        }
+    return {"action": "noop", "active": active}

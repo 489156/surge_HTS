@@ -315,15 +315,16 @@
     <button class="primary" onclick="runCycle()" title="모의 트레이딩 1회 실행: 후보 평가→토론→리스크→체결">▶ 1회 실행 (Run cycle)</button>
     <button class="danger" onclick="fireKill()" title="비상 정지: 미체결 주문 취소 + 포지션 청산 + 거래 중단">■ 긴급 정지 (Kill switch)</button>
     <button onclick="resetKill()" title="비상 정지 해제">↺ 정상 복귀 (Reset)</button>
+    <button onclick="resetPaper()" title="모의 계좌 초기화 ($100,000, PAPER 전용)">🧹 모의계좌 초기화</button>
   </div>
 </header>
 
 <!-- Navigation Tabs -->
 <div class="nav-tabs">
-  <button class="tab-btn active" onclick="switchTab('all')">🌐 전체 보기 (All Overview)</button>
-  <button class="tab-btn" onclick="switchTab('trade')">⚡ 실전 매매 &amp; 포트폴리오</button>
-  <button class="tab-btn" onclick="switchTab('ai')">🤖 AI 위원회 &amp; 신호</button>
-  <button class="tab-btn" onclick="switchTab('verdict')">📊 통계 검증 &amp; 리스크</button>
+  <button class="tab-btn active" onclick="switchTab('all', this)">🌐 전체 보기 (All Overview)</button>
+  <button class="tab-btn" onclick="switchTab('trade', this)">⚡ 실전 매매 &amp; 포트폴리오</button>
+  <button class="tab-btn" onclick="switchTab('ai', this)">🤖 AI 위원회 &amp; 신호</button>
+  <button class="tab-btn" onclick="switchTab('verdict', this)">📊 통계 검증 &amp; 리스크</button>
 </div>
 
 <main>
@@ -335,14 +336,14 @@
     </div>
     <div class="exec-grid">
       <div class="exec-card">
-        <div class="label">시장 레짐 (Market Regime)</div>
-        <div class="val" id="exec-regime"><span class="pos">🟢 Risk-On</span></div>
-        <div class="mut" style="font-size:11px;margin-top:2px">변동성 안정 및 모멘텀 유효</div>
+        <div class="label">운용 상태 (System &amp; Regime)</div>
+        <div class="val" id="exec-regime"><span class="mut">확인 중…</span></div>
+        <div class="mut" id="exec-regime-sub" style="font-size:11px;margin-top:2px">파이프라인 상태 확인 중</div>
       </div>
       <div class="exec-card">
         <div class="label">오늘의 핵심 픽 (Top Action)</div>
-        <div class="val" id="exec-pick" style="font-size:16px"><span class="pos">SOXL 매수 (확신 85%)</span></div>
-        <div class="mut" style="font-size:11px;margin-top:2px">반도체 아시아장 선행 갭 반영</div>
+        <div class="val" id="exec-pick" style="font-size:16px"><span class="mut">—</span></div>
+        <div class="mut" id="exec-pick-sub" style="font-size:11px;margin-top:2px">세션 데이터 대기 중</div>
       </div>
       <div class="exec-card">
         <div class="label">포트폴리오 총 평가액</div>
@@ -351,8 +352,8 @@
       </div>
       <div class="exec-card">
         <div class="label">통계 검증 상태 (Verdict)</div>
-        <div class="val" id="exec-verdict" style="font-size:15px"><span class="mut">🟡 표본 축적 (가설 단계)</span></div>
-        <div class="mut" style="font-size:11px;margin-top:2px">⭐ 신호 전까지 보수적 접근</div>
+        <div class="val" id="exec-verdict" style="font-size:15px"><span class="mut">—</span></div>
+        <div class="mut" id="exec-verdict-sub" style="font-size:11px;margin-top:2px">⭐ 신호 전까지 보수적 접근</div>
       </div>
     </div>
     <div id="brief" style="margin-top:14px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;font-size:13px">불러오는 중…</div>
@@ -664,9 +665,10 @@ async function j(u, o) { const r = await fetch(u, o); return r.json(); }
 const markCls = m => ({ '🟢': 'm-grn', '⛔': 'm-red', '🔴': 'm-red', '🟡': 'm-amb', '⭐': 'm-star' }[m] || '');
 
 // Tab Switcher
-function switchTab(tab) {
+function switchTab(tab, el) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
+  const btn = el || (typeof event !== 'undefined' && event?.target?.closest?.('.tab-btn'));
+  if (btn) btn.classList.add('active');
   const sTrade = $('#sec-trade'), sAi = $('#sec-ai'), sVerdict = $('#sec-verdict');
   if (tab === 'all') {
     sTrade.style.display = 'block';
@@ -729,6 +731,10 @@ async function refresh() {
   $('#hero-badge').textContent = badge;
   $('#hero-badge').className = 'pill ' + bcls;
   $('#hero-sub').textContent = vg.headline || '운영 중';
+  $('#exec-verdict').innerHTML = nStar
+    ? `<span class="pos">⭐ 실전 검증 신호 ${nStar}개</span>`
+    : (nEdge ? `<span class="warn">🟢 가설 우위 ${nEdge}개 (검증 중)</span>` : '<span class="neg">⛔ 검증 신호 없음 (보류)</span>');
+  $('#exec-verdict-sub').textContent = vg.headline || '통계적 유의성 확인 전까지 실전 주의';
   $('#hero-chips').innerHTML = S.map(x =>
     `<span class="pill ${markCls(x.mark)}" style="margin-right:6px">${x.mark} <b>${shortName(x.strategy)}</b>: ${x.value == null ? '—' : pp(x.value)} (n=${x.n})</span>`).join('');
   $('#verdict').innerHTML = thead(['', '전략', '전략 적중률', '기준선(찍기)', '실력 초과', '표본수', '신호 증거(e-값)', '최종 판정']) + '<tbody>' + S.map(x =>
@@ -754,6 +760,25 @@ async function refresh() {
   const age = du.calls && du.calls[0] ? du.calls[0].age_hours : null;
   $('#duel-asof').innerHTML = `콜 세션: <b>${du.date || '—'}</b> (${age == null ? '—' : age + '시간 전 생성'})`
     + (du.stale ? ' <span class="neg">⚠ 갱신 필요 (surge duel 실행)</span>' : ' <span class="pos">✓ 실시간</span>');
+  const activeDuel = (du.calls || []).filter(c => c.side && c.side !== 'STAND_ASIDE')
+    .sort((a, b) => Math.abs(b.score || 0) - Math.abs(a.score || 0));
+  if (h.halted) {
+    $('#exec-regime').innerHTML = '<span class="neg">🔴 거래 중단 (Kill Switch)</span>';
+  } else if (du.stale) {
+    $('#exec-regime').innerHTML = `<span class="warn">⚠ 콜 갱신 지연 (${h.mode})</span>`;
+  } else {
+    $('#exec-regime').innerHTML = `<span class="pos">🟢 정상 가동 (${h.mode})</span>`;
+  }
+  const ing = h.last_ingest && h.last_ingest.finished_at ? h.last_ingest.finished_at.slice(0, 16).replace('T', ' ') : '기록 없음';
+  $('#exec-regime-sub').textContent = `최근 수집: ${ing} · ${h.last_ingest ? h.last_ingest.status : '—'}`;
+  if (activeDuel.length) {
+    const topD = activeDuel[0];
+    $('#exec-pick').innerHTML = `<span class="${cls(topD.score)}">${topD.side} (${Math.round(Math.abs(topD.score || 0) * 100)}%)</span>`;
+    $('#exec-pick-sub').textContent = `${topD.pair} · 세션 ${du.date || '—'} ${du.stale ? '(지연)' : '(유효)'}`;
+  } else {
+    $('#exec-pick').innerHTML = '<span class="mut">⏸ 전 종목 관망</span>';
+    $('#exec-pick-sub').textContent = `세션 ${du.date || '—'} 기준 활성 방향성 콜 없음`;
+  }
   const dt = du.tally || {}, nb = (dt.wins || 0) + (dt.losses || 0);
   $('#duel-tally').textContent = dt.accuracy == null ? '누적 채점 없음' :
     `누적 베팅: ${nb}건 · 적중률: ${(dt.accuracy * 100).toFixed(0)}% · 평균손익: ${dt.avg_pnl_pct == null ? '—' : (dt.avg_pnl_pct * 100).toFixed(1) + '%'}`;
@@ -782,9 +807,9 @@ async function refresh() {
   $('#q-sharpe').innerHTML = qa.sharpe_ratio != null ? `<span class="${cls(qa.sharpe_ratio)}">${fmt(qa.sharpe_ratio, 2)}</span>` : '—';
   $('#q-sortino').innerHTML = qa.sortino_ratio != null ? `<span class="${cls(qa.sortino_ratio)}">${fmt(qa.sortino_ratio, 2)}</span>` : '—';
   $('#q-calmar').innerHTML = qa.calmar_ratio != null ? `<span class="${cls(qa.calmar_ratio)}">${fmt(qa.calmar_ratio, 2)}</span>` : '—';
-  $('#q-mdd').innerHTML = qa.max_drawdown != null ? `<span class="neg">${(qa.max_drawdown * 100).toFixed(1)}%</span>` : '—';
-  $('#q-cvar').innerHTML = qa.cvar_95 != null ? `<span class="neg">${(qa.cvar_95 * 100).toFixed(1)}%</span>` : '—';
-  $('#q-winrate').innerHTML = qa.win_rate != null ? `<span class="${cls(qa.win_rate - 0.5)}">${(qa.win_rate * 100).toFixed(0)}%</span>` : '—';
+  $('#q-mdd').innerHTML = qa.max_drawdown != null ? `<span class="neg">${qa.max_drawdown.toFixed(1)}%</span>` : '—';
+  $('#q-cvar').innerHTML = qa.cvar_95 != null ? `<span class="neg">${qa.cvar_95.toFixed(1)}%</span>` : '—';
+  $('#q-winrate').innerHTML = qa.win_rate != null ? `<span class="${cls(qa.win_rate - 50)}">${qa.win_rate.toFixed(0)}%</span>` : '—';
 
   // 6. Equity Chart
   const eq = await j('/api/equity'), EP = eq.points || [];
@@ -842,7 +867,10 @@ async function refresh() {
   const lg = await j('/api/learning'), LR = lg.runs || [];
   $('#learning').innerHTML = thead(['학습 일자', '채점 완료', '신규 발굴 가설', '상태']) + '<tbody>' + LR.map(x => {
     const sc = x.scored || {}, nv = v => v == null ? '—' : v;
-    return `<tr><td class="mut">${x.run_date || '—'}</td><td class="mono">duel ${nv(sc.duel)} · rot ${nv(sc.rotation)}</td><td>${(x.discovered_new || []).join(', ') || '없음'}</td><td><span class="tag2 ok">정상 반영</span></td></tr>`;
+    const va = x.variant_action && x.variant_action.action && x.variant_action.action !== 'noop'
+      ? ` <span class="tag2 warn">${x.variant_action.action}: ${x.variant_action.from}→${x.variant_action.to}</span>`
+      : '';
+    return `<tr><td class="mut">${x.run_date || '—'}</td><td class="mono">duel ${nv(sc.duel)} · rot ${nv(sc.rotation)}</td><td>${(x.discovered_new || []).join(', ') || '없음'}</td><td><span class="tag2 ok">정상 반영</span>${va}</td></tr>`;
   }).join('') + '</tbody>' || emptyRow(4);
 
   const a = await j('/api/audit?limit=16');
@@ -907,6 +935,7 @@ async function loadRot(t, name) {
 async function runCycle() { await j('/api/trade?top=10', { method: 'POST' }); refresh(); }
 async function fireKill() { if (confirm('긴급 정지 — 모든 모의 주문을 취소하고 포지션을 청산하시겠습니까?')) { await j('/api/killswitch?reason=dashboard', { method: 'POST' }); refresh(); } }
 async function resetKill() { await j('/api/killswitch/reset', { method: 'POST' }); refresh(); }
+async function resetPaper() { if (confirm('모의(PAPER) 계좌의 포지션·수익률 이력을 초기화하고 $100,000로 재설정하시겠습니까?')) { await j('/api/portfolio/reset', { method: 'POST' }); refresh(); } }
 async function approve(id, act) { await j('/api/approvals/' + id + '?action=' + act, { method: 'POST' }); refresh(); }
 
 refresh();

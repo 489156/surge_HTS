@@ -144,10 +144,13 @@ def run_daily(write: bool = True) -> dict:
         "surge": _safe("surge-outcomes", evaluation.backfill_outcomes, warnings),
     }
 
-    # ── 2. EVOLVE — register newly-proposed hypotheses (self-evolution; reversible) ──
+    # ── 2. EVOLVE — register newly-proposed hypotheses + guarded auto-manage ──
+    from .duel import variants as duel_variants
+
     _safe("evolve", learn.register_discovered, warnings)
     _safe("evolve_rotation", learn.register_rotation_discovered, warnings)
     pruned = _safe("prune", learn.prune_stale_discovered, warnings) or []
+    variant_action = _safe("variants-auto", duel_variants.auto_manage, warnings) or {}
     all_disc = sorted(_safe("discovered", learn.discovered_variants, warnings) or {})
     all_disc_rot = sorted(_safe("discovered_rotation", learn.discovered_rotation_variants, warnings) or {})
 
@@ -266,6 +269,16 @@ def run_daily(write: bool = True) -> dict:
     discovered_new = sorted(set(all_disc) - prev_disc)
     prev_ev = prev.get("evidence") or {}
     changes: list[str] = []
+    if variant_action.get("action") == "promote":
+        changes.append(
+            f"duel 모델 자동승격: {variant_action['from']}→{variant_action['to']} "
+            f"(n={variant_action.get('n')}, z={variant_action.get('z', 0):.2f})"
+        )
+    elif variant_action.get("action") == "rollback":
+        changes.append(
+            f"duel 모델 자동롤백: {variant_action['from']}→champion "
+            f"(최근 {variant_action.get('n')}건 {variant_action.get('active_acc', 0)*100:.0f}%)"
+        )
     for name, e in evidence.items():
         pe = (prev_ev.get(name) or {}).get("evidence_pct")
         cur = e.get("evidence_pct")
@@ -289,6 +302,7 @@ def run_daily(write: bool = True) -> dict:
         "discovered_all": all_disc,
         "discovered_rotation": all_disc_rot,
         "pruned_variants": pruned,
+        "variant_action": variant_action,
         "evidence": evidence,
         "changes": changes,
         "promote_ready": promote_ready,   # HITL — surfaced, not executed

@@ -327,35 +327,43 @@ def _rotation() -> dict:
                    returns=rets)             # continuous-magnitude track (no clean pairing)
 
 
-def _surge() -> dict:
-    # HONEST metric — robust to the fat tail. "+100% rate vs market base rate"
-    # is a false-edge trap (it only proves the screen picks micro-caps), and the
-    # arithmetic mean return is inflated by a few +500% lottery wins. The honest
-    # "typical outcome" test is the WIN RATE: do more than half the picks even
-    # rise next day, vs a 0.5 coin?
+def _surge_track(
+    strategy_type: str, label: str, metric: str, fade: bool = False
+) -> dict:
+    """Evaluate a candidate strategy track against coin-flip with winsorized stats."""
     with connect() as c:
         rows = c.execute(
             "SELECT next_pct, snapshot_date FROM candidate_outcomes "
-            "WHERE next_pct IS NOT NULL ORDER BY snapshot_date").fetchall()
+            "WHERE next_pct IS NOT NULL AND strategy_type = ? ORDER BY snapshot_date",
+            (strategy_type,),
+        ).fetchall()
     vals = [r["next_pct"] for r in rows]
     n = len(vals)
-    wins = sum(1 for v in vals if v > 0)
+    rets = [(-v if fade else v) / 100.0 for v in vals]
+    hits = [1 if (v < 0 if fade else v > 0) else 0 for v in vals]
+    wins = sum(hits)
     acc = (wins / n) if n else None
     excess = (acc - 0.5) if acc is not None else None
     z = _binom_z(wins, n, 0.5)
     mark, msg = _verdict(n, excess, z)
-    # economic check uses the MEDIAN (not the fat-tail mean) — the typical pick
-    median = sorted(vals)[n // 2] / 100 if n else None   # next_pct stored as %
-    d = {"strategy": "surge (US +100% 점화)", "metric": "익일 상승 비율",
+    median = sorted(rets)[n // 2] if n else None
+    d = {"strategy": label, "metric": metric,
          "value": acc, "baseline": 0.5, "excess": excess, "z": z,
          "n": n, "mark": mark, "verdict": msg}
-    return _finish(d, [1 if v > 0 else 0 for v in vals],
-                   [r["snapshot_date"] for r in rows], 0.5, median,
-                   returns=[v / 100.0 for v in vals])   # next_pct(%) → fraction; winsorized
+    return _finish(d, hits, [r["snapshot_date"] for r in rows], 0.5, median,
+                   returns=rets)
+
+
+def _surge_pre() -> dict:
+    return _surge_track("pre_catalyst", "surge (US 전야·매집)", "익일 상승 비율", fade=False)
+
+
+def _reversion() -> dict:
+    return _surge_track("reversion_fade", "reversion (급등 되돌림)", "익일 하락 비율", fade=True)
 
 
 def assess() -> list[dict]:
-    return [_duel(), _rotation(), _surge()]
+    return [_duel(), _rotation(), _surge_pre(), _reversion()]
 
 
 def headline() -> str:

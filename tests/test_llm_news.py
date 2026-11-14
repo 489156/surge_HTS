@@ -77,3 +77,30 @@ def test_newsagent_falls_back_when_llm_returns_none(monkeypatch):
         "AAPL", _ctx(headlines=["x"],
                      catalysts=[{"event_type": "earnings"}]))
     assert "earnings" in op.reasoning  # rule-based path
+
+
+def test_analyze_persona_handles_none_snapshot_fields(monkeypatch):
+    import sys
+    import types
+
+    class _FakeMessages:
+        @staticmethod
+        def create(**kwargs):
+            txt = '{"score": 65, "confidence": 70, "reasoning": "ok"}'
+            return types.SimpleNamespace(content=[types.SimpleNamespace(text=txt)])
+
+    fake_anthropic = types.SimpleNamespace(
+        Anthropic=lambda **kw: types.SimpleNamespace(messages=_FakeMessages())
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+    monkeypatch.setattr(settings, "anthropic_api_key", "k")
+
+    ctx = {
+        "snapshot": {"market_cap": None, "rvol": None, "pct_change": None},
+        "trap": {},
+        "catalysts": [],
+        "headlines": ["test headline"],
+    }
+    res = llm.analyze_persona("TEST", "You are Warren Buffett.", ctx)
+    assert res is not None
+    assert res["score"] == 65.0

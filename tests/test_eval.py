@@ -74,3 +74,33 @@ def test_backfill_and_metrics(db, monkeypatch):
 def test_empty_summary(db):
     s = evaluation.summary()
     assert s["candidates_evaluated"] == 0
+
+
+def test_backfill_reversion_fade_vs_pre_catalyst(db, monkeypatch):
+    with connect(db) as conn:
+        ensure_securities(conn, {"PRE", "FADE"})
+        upsert(conn, "daily_snapshot", [
+            {"symbol": "PRE", "snapshot_date": "2026-06-11", "close": 10.0, "captured_at": "x"},
+        ])
+        upsert(conn, "candidates", [
+            {"symbol": "PRE", "snapshot_date": "2026-06-10", "strategy_type": "pre_catalyst",
+             "score": 5.0, "close": 10.0, "captured_at": "x"},
+            {"symbol": "FADE", "snapshot_date": "2026-06-10", "strategy_type": "reversion_fade",
+             "score": 4.0, "close": 10.0, "captured_at": "x"},
+        ])
+
+    def fake_dl(syms, start=None, **k):
+        return pd.DataFrame({
+            "symbol": [syms[0], syms[0]],
+            "date": ["2026-06-10", "2026-06-11"],
+            "open": [10.0, 9.5], "high": [10.0, 9.6],
+            "low": [9.5, 8.9], "close": [10.0, 9.0],
+            "volume": [1000, 1000],
+        })
+
+    monkeypatch.setattr(evaluation.market, "download_ohlcv", fake_dl)
+    assert evaluation.backfill_outcomes() == 2
+    s = evaluation.summary()
+    assert s["by_strategy"]["pre_catalyst"]["hit_rate"] == 0.0
+    assert s["by_strategy"]["reversion_fade"]["hit_rate"] == 1.0  # -10% drop = fade hit
+    assert s["by_strategy"]["reversion_fade"]["surge_rate"] == 0.0

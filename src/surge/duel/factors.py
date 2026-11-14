@@ -240,6 +240,21 @@ def _skew_tail_bear(ctx: dict) -> float | None:
     return None if stress <= 0 else _clip(-stress)
 
 
+def _opt_pc_contrarian(ctx: dict) -> float | None:
+    """Prior-session options P/C OI extremes as contrarian crowd signal."""
+    z = ctx.get("opt_pc_oi_z")
+    if z is not None:
+        return None if abs(z) < 0.75 else _clip(math.tanh(float(z) / 2.0))
+    oi = ctx.get("opt_pc_oi")
+    if oi is None:
+        return None
+    if oi >= 1.3:
+        return _clip((float(oi) - 1.1) / 0.5)
+    if oi <= 0.6:
+        return _clip((float(oi) - 0.8) / 0.4)
+    return None
+
+
 CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     "asia_breadth": _asia_breadth,
     "und_accel": _und_accel,
@@ -259,6 +274,7 @@ CANDIDATE_FACTORS: dict[str, Callable[[dict], float | None]] = {
     # volatility term-structure / surface (signed directional hypotheses)
     "vix_backwardation": _vix_backwardation_bear,
     "skew_tail": _skew_tail_bear,
+    "opt_pc_contrarian": _opt_pc_contrarian,
     # blind-spot fills — raced exactly on the abstain-cause populations
     "weak_drift": _weak_drift,
     "conflict_asia_tiebreak": _conflict_asia_tiebreak,

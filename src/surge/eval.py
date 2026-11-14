@@ -35,7 +35,9 @@ def backfill_outcomes() -> int:
             "SELECT MAX(snapshot_date) d FROM daily_snapshot"
         ).fetchone()["d"]
         rows = conn.execute(
-            "SELECT c.symbol, c.snapshot_date, c.score, c.close "
+            "SELECT c.symbol, c.snapshot_date, "
+            "COALESCE(c.strategy_type, 'legacy_chase') AS strategy_type, "
+            "c.score, c.close "
             "FROM candidates c "
             "LEFT JOIN candidate_outcomes o "
             "  ON c.symbol = o.symbol AND c.snapshot_date = o.snapshot_date "
@@ -43,13 +45,16 @@ def backfill_outcomes() -> int:
             (latest_snap,),
         ).fetchall()
 
-    pending = [(r["symbol"], r["snapshot_date"], r["score"], r["close"]) for r in rows]
+    pending = [
+        (r["symbol"], r["snapshot_date"], r["strategy_type"], r["score"], r["close"])
+        for r in rows
+    ]
     if not pending:
         logger.info("no candidate outcomes to backfill")
         return 0
 
     written = 0
-    for sym, snap_date, score, cand_close in pending:
+    for sym, snap_date, stype, score, cand_close in pending:
         try:
             # Fetch FROM the snapshot date, not a fixed look-back: a candidate
             # older than `window` would otherwise resolve its "next day" to the
@@ -77,17 +82,19 @@ def backfill_outcomes() -> int:
         next_high = float(nxt["high"])
         next_pct = (next_close / cand_close - 1.0) * 100
         next_high_pct = (next_high / cand_close - 1.0) * 100
+        is_fade = stype == "reversion_fade"
         outcome = {
             "symbol": sym,
             "snapshot_date": snap_date,
+            "strategy_type": stype,
             "score": score,
             "next_date": str(nxt["d"]),
             "cand_close": cand_close,
             "next_close": next_close,
             "next_pct": next_pct,
             "next_high_pct": next_high_pct,
-            "hit": 1 if next_pct >= settings.near_surge_pct else 0,
-            "surged100": 1 if next_high_pct >= settings.surge_threshold_pct else 0,
+            "hit": (1 if next_pct <= -5.0 else 0) if is_fade else (1 if next_pct >= settings.near_surge_pct else 0),
+            "surged100": 0 if is_fade else (1 if next_high_pct >= settings.surge_threshold_pct else 0),
             "captured_at": utc_now(),
         }
         with connect() as conn:
@@ -147,6 +154,11 @@ def summary() -> dict:
         # base rate: surges vs all snapshots that have a known next-day outcome
         snaps = conn.execute("SELECT COUNT(*) n FROM daily_snapshot").fetchone()["n"]
         surges = conn.execute("SELECT COUNT(*) n FROM surge_events").fetchone()["n"]
+        by_rows = conn.execute(
+            "SELECT COALESCE(strategy_type, 'legacy_chase') AS stype, COUNT(*) n, "
+            "AVG(hit) hit_rate, AVG(surged100) surge_rate, AVG(next_pct) mean_pct "
+            "FROM candidate_outcomes GROUP BY stype"
+        ).fetchall()
 
     n = o["n"] or 0
     base_rate = (surges / snaps) if snaps else 0.0
@@ -159,4 +171,13 @@ def summary() -> dict:
         "candidate_surge_rate": surge_rate,
         "mean_next_pct": o["mean_pct"] or 0.0,
         "lift_vs_base": (surge_rate / base_rate) if base_rate else None,
+        "by_strategy": {
+            r["stype"]: {
+                "n": r["n"],
+                "hit_rate": r["hit_rate"] or 0.0,
+                "surge_rate": r["surge_rate"] or 0.0,
+                "mean_next_pct": r["mean_pct"] or 0.0,
+            }
+            for r in by_rows
+        },
     }

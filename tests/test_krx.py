@@ -91,3 +91,52 @@ def test_health_structure(monkeypatch):
     assert len(h["capabilities"]) == 4
     flow = next(c for c in h["capabilities"] if "investor_flows" in c["capability"])
     assert flow["gated"] is False and flow["ok"] is True
+
+
+def test_naver_mobile_flows_parses_json(monkeypatch):
+    import httpx
+
+    payload = [
+        {"bizdate": "20260612", "foreignerPureBuyQuant": "+1,250", "organPureBuyQuant": "-300"},
+        {"bizdate": "20260611", "foreignerPureBuyQuant": "-", "organPureBuyQuant": "100"},
+        {"bizdate": "20260610", "foreignerPureBuyQuant": "-400", "organPureBuyQuant": "+800"},
+    ]
+
+    class FakeResp:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url, params=None): return FakeResp()
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    df = krx._naver_mobile_flows("005930", pages=1)
+    assert list(df.columns) == ["date", "foreign_net", "inst_net"]
+    assert list(df["date"]) == ["2026-06-10", "2026-06-12"]
+    assert df.iloc[1]["foreign_net"] == 1250.0
+    assert df.iloc[1]["inst_net"] == -300.0
+
+
+def test_pykrx_fallback_auto_dates_and_korean_columns(monkeypatch):
+    monkeypatch.setattr(krx, "_naver_flows", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(krx, "bridge_credentials", lambda: True)
+    seen = {}
+
+    def fake_flows(s_dt, e_dt, ticker):
+        seen["args"] = (s_dt, e_dt, ticker)
+        return pd.DataFrame({
+            "날짜": pd.to_datetime(["2026-06-10", "2026-06-11"]),
+            "외국인합계": [500, -100],
+            "기관합계": [-50, 300],
+        }).set_index("날짜")
+
+    fake = types.SimpleNamespace(get_market_trading_volume_by_date=fake_flows)
+    monkeypatch.setattr(krx, "_stock", lambda: fake)
+    df = krx.investor_flows("005930")
+    assert len(seen["args"][0]) == 8 and len(seen["args"][1]) == 8
+    assert seen["args"][2] == "005930"
+    assert list(df.columns) == ["date", "foreign_net", "inst_net"]
+    assert len(df) == 2 and df.iloc[0]["foreign_net"] == 500

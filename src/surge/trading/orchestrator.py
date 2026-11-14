@@ -20,7 +20,7 @@ from loguru import logger
 
 from ..config import settings
 from ..db import connect
-from . import killswitch, store
+from . import killswitch, llm, store
 from .agents import Agent, DEFAULT_AGENTS, compute_macro_regime
 from .committee import COMMITTEE_AGENTS
 from .audit import audit
@@ -44,18 +44,49 @@ class TradingEngine:
 
     # ── context assembly ─────────────────────────────────────────────────────
     def _candidate_symbols(self, top: int) -> list[str]:
+        from .. import verdict
+
+        src = getattr(settings, "trading_signal_source", "auto")
+        duel_ok = src in ("auto", "duel") and verdict._duel().get("mark") != "⛔"
+        surge_ok = (
+            src in ("auto", "pre_catalyst", "surge")
+            and verdict._surge_pre().get("mark") != "⛔"
+        )
+        syms: list[str] = []
         with connect() as conn:
-            latest = conn.execute(
-                "SELECT MAX(snapshot_date) d FROM candidates"
-            ).fetchone()["d"]
-            if not latest:
-                return []
-            rows = conn.execute(
-                "SELECT symbol FROM candidates WHERE snapshot_date=? "
-                "ORDER BY score DESC LIMIT ?",
-                (latest, top),
-            ).fetchall()
-        return [r["symbol"] for r in rows]
+            if duel_ok:
+                d_date = conn.execute(
+                    "SELECT MAX(decision_date) d FROM duel_decisions"
+                ).fetchone()["d"]
+                if d_date:
+                    d_rows = conn.execute(
+                        "SELECT side FROM duel_decisions "
+                        "WHERE decision_date=? AND side != 'STAND_ASIDE' "
+                        "ORDER BY COALESCE(conviction, 0) DESC",
+                        (d_date,),
+                    ).fetchall()
+                    for r in d_rows:
+                        s = r["side"]
+                        if s and s not in syms:
+                            syms.append(s)
+
+            if surge_ok and len(syms) < top:
+                latest = conn.execute(
+                    "SELECT MAX(snapshot_date) d FROM candidates "
+                    "WHERE strategy_type='pre_catalyst'"
+                ).fetchone()["d"]
+                if latest:
+                    c_rows = conn.execute(
+                        "SELECT symbol FROM candidates "
+                        "WHERE snapshot_date=? AND strategy_type='pre_catalyst' "
+                        "ORDER BY score DESC LIMIT ?",
+                        (latest, top),
+                    ).fetchall()
+                    for r in c_rows:
+                        s = r["symbol"]
+                        if s and s not in syms:
+                            syms.append(s)
+        return syms[:top]
 
     def _ctx(self, symbol: str, macro: MacroRegime, status: RiskStatus) -> dict:
         with connect() as conn:
@@ -90,19 +121,14 @@ class TradingEngine:
             if last is None:
                 continue
                 
-            # Dynamic Trailing Stop
+            # Dynamic Trailing Stop: tighten from highest high once profitable (or initialize)
             if settings.enable_trailing_stops:
                 potential_stop = last * (1 - settings.trailing_stop_pct)
-                if p.stop_price is None or potential_stop > p.stop_price:
-                    # Do not trail stop if it's below average price and we're not profitable yet,
-                    # or if we want strict trailing, we can just do it always.
-                    # Let's only trail if we're profitable to avoid tightening too early,
-                    # OR just strictly trail from highest high.
-                    if p.stop_price is None or (last > p.avg_price and potential_stop > p.stop_price):
-                        p.stop_price = potential_stop
-                        store.upsert_position(p)
-                        audit("execution", "trailing_stop_updated", symbol=p.symbol,
-                              payload={"last": last, "new_stop": potential_stop})
+                if p.stop_price is None or (last > p.avg_price and potential_stop > p.stop_price):
+                    p.stop_price = potential_stop
+                    store.upsert_position(p)
+                    audit("execution", "trailing_stop_updated", symbol=p.symbol,
+                          payload={"last": last, "new_stop": potential_stop})
 
             if p.stop_price and last <= p.stop_price:
                 audit("execution", "stop_loss", symbol=p.symbol,
@@ -154,25 +180,29 @@ class TradingEngine:
         # The universe is already sorted by Technical score DESC.
         MAX_LLM_EVALS = 3
         llm_evals_done = 0
-        
+
         for symbol in universe:
             ref = last_prices.get(symbol)
             if not ref:
                 continue
             ctx = self._ctx(symbol, macro, status)
-            
+
+            use_llm = bool(settings.anthropic_api_key and llm_evals_done < MAX_LLM_EVALS)
+            if use_llm and "headlines" not in ctx and any(hasattr(a, "persona_prompt") for a in self.agents):
+                ctx["headlines"] = llm.fetch_headlines(symbol)
+
             opinions = []
-            has_llm_agent = False
+            used_llm = False
             for a in self.agents:
-                is_llm_persona = hasattr(a, "persona_prompt")
-                if is_llm_persona:
-                    has_llm_agent = True
-                    if llm_evals_done >= MAX_LLM_EVALS:
-                        opinions.append(a._op(symbol, 50.0, 10.0, "Cost Filter: Skipped LLM evaluation"))
+                if hasattr(a, "persona_prompt"):
+                    if not use_llm:
+                        # Cost/key budget exhausted: preserve deterministic rule evaluation & Burry veto
+                        opinions.append(a.evaluate_rules(symbol, ctx))
                         continue
+                    used_llm = True
                 opinions.append(a.evaluate(symbol, ctx))
-                
-            if has_llm_agent:
+
+            if used_llm:
                 llm_evals_done += 1
                 
             debate = run_debate(opinions, ctx=ctx)

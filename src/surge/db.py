@@ -189,11 +189,21 @@ def _migrate_sqlite(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE duel_decisions "
                      "ADD COLUMN forced INTEGER DEFAULT 0")
         logger.info("migrated duel_decisions: added forced column")
+    if cols and "atr_pct" not in _cols():
+        conn.execute("ALTER TABLE duel_decisions ADD COLUMN atr_pct REAL")
+        logger.info("migrated duel_decisions: added atr_pct column")
     rcols = [r[1] for r in
              conn.execute("PRAGMA table_info(rotation_decisions)").fetchall()]
     if rcols and "components" not in rcols:
         conn.execute("ALTER TABLE rotation_decisions ADD COLUMN components TEXT")
         logger.info("migrated rotation_decisions: added components column")
+    for tbl in ("candidates", "candidate_outcomes"):
+        tcols = [r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()]
+        if tcols and "strategy_type" not in tcols:
+            conn.execute(
+                f"ALTER TABLE {tbl} ADD COLUMN strategy_type TEXT DEFAULT 'legacy_chase'"
+            )
+            logger.info("migrated %s: added strategy_type column", tbl)
 
 
 def ensure_securities(conn: sqlite3.Connection, symbols: Iterable[str]) -> None:

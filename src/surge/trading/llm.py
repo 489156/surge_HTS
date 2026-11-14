@@ -110,13 +110,20 @@ def analyze_persona(symbol: str, persona_prompt: str, ctx: dict) -> dict | None:
     
     context_str = f"Ticker: {symbol}\nMacro Regime: {macro}\n"
     if snap:
-        context_str += f"Snapshot: Market Cap=${snap.get('market_cap', 0):,}, RVOL={snap.get('rvol', 0)}, Pct Change={snap.get('pct_change', 0)}%\n"
+        mcap = float(snap.get("market_cap") or 0)
+        rvol = snap.get("rvol")
+        pct = snap.get("pct_change")
+        context_str += (
+            f"Snapshot: Market Cap=${mcap:,.0f}, "
+            f"RVOL={rvol if rvol is not None else 0}, "
+            f"Pct Change={pct if pct is not None else 0}%\n"
+        )
     if trap:
         context_str += f"Risk Flags: {trap}\n"
     if cats:
         context_str += f"Catalysts/Filings: {[c.get('detail') for c in cats]}\n"
-        
-    headlines = ctx.get("headlines") or fetch_headlines(symbol)
+
+    headlines = ctx["headlines"] if "headlines" in ctx else fetch_headlines(symbol)
     if headlines:
         bullets = "\n".join(f"- {h}" for h in headlines[:5])
         context_str += f"Recent News Headlines:\n{bullets}\n"

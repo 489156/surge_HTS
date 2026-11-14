@@ -178,5 +178,44 @@ def test_assess_covers_all_strategies(db):
     assert any("duel" in n for n in names)
     assert any("rotation" in n for n in names)
     assert any("surge" in n for n in names)
+    assert any("reversion" in n for n in names)
     for r in rows:                               # every row carries a verdict mark
         assert r["mark"] in ("🟢", "🟡", "🔴", "⛔")
+
+
+def test_verdict_splits_pre_catalyst_and_reversion_tracks(db):
+    from datetime import date, timedelta
+
+    start = date(2026, 6, 1)
+    rows = []
+    for i in range(40):
+        d = (start + timedelta(days=i)).isoformat()
+        rows.append({
+            "symbol": "LEG", "snapshot_date": d, "strategy_type": "legacy_chase",
+            "score": 5.0, "next_date": d, "cand_close": 10.0, "next_close": 8.0,
+            "next_pct": -20.0, "next_high_pct": -10.0, "hit": 0, "surged100": 0,
+            "captured_at": "x",
+        })
+        rows.append({
+            "symbol": "PRE", "snapshot_date": d, "strategy_type": "pre_catalyst",
+            "score": 5.0, "next_date": d, "cand_close": 10.0, "next_close": 10.5,
+            "next_pct": 5.0, "next_high_pct": 6.0, "hit": 0, "surged100": 0,
+            "captured_at": "x",
+        })
+        rows.append({
+            "symbol": "REV", "snapshot_date": d, "strategy_type": "reversion_fade",
+            "score": 3.0, "next_date": d, "cand_close": 10.0, "next_close": 8.8,
+            "next_pct": -12.0, "next_high_pct": -2.0, "hit": 1, "surged100": 0,
+            "captured_at": "x",
+        })
+    with connect(db) as conn:
+        from surge.db import ensure_securities
+        ensure_securities(conn, {"LEG", "PRE", "REV"})
+        db_upsert(conn, "candidate_outcomes", rows)
+
+    pre = V._surge_pre()
+    rev = V._reversion()
+    assert pre["n"] == 40 and pre["value"] == 1.0  # legacy_chase(-20%) excluded
+    assert rev["n"] == 40 and rev["value"] == 1.0  # next_pct < 0 is win for fade
+    assert rev["signal"] is True
+    assert rev["signal_checks"][4]["v"] == "+12.0%"

@@ -123,26 +123,94 @@ def _stock():
         return None
 
 
+def _parse_kr_int(val) -> float | None:
+    if val is None:
+        return None
+    s = str(val).replace(",", "").replace("+", "").strip()
+    if not s or s == "-":
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _naver_mobile_flows(ticker: str, pages: int = 3) -> pd.DataFrame:
+    """Structured JSON fallback via Naver mobile trend API (keyless, fast)."""
+    import httpx
+
+    page_size = min(max(pages, 1) * 20, 60)
+    url = f"https://m.stock.naver.com/api/stock/{ticker}/trend"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": f"https://m.stock.naver.com/domestic/stock/{ticker}/total",
+    }
+    try:
+        with httpx.Client(timeout=settings.request_timeout, headers=headers) as client:
+            r = client.get(url, params={"pageSize": page_size})
+            r.raise_for_status()
+            items = r.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("naver mobile flows {} failed: {}", ticker, exc)
+        return pd.DataFrame()
+    if not isinstance(items, list) or not items:
+        return pd.DataFrame()
+    parsed = []
+    for row in items:
+        bd = str(row.get("bizdate") or "").strip()
+        if len(bd) != 8 or not bd.isdigit():
+            continue
+        fn = _parse_kr_int(row.get("foreignerPureBuyQuant"))
+        ins = _parse_kr_int(row.get("organPureBuyQuant"))
+        if fn is None or ins is None:
+            continue
+        parsed.append({
+            "date": f"{bd[:4]}-{bd[4:6]}-{bd[6:]}",
+            "foreign_net": fn,
+            "inst_net": ins,
+        })
+    if not parsed:
+        return pd.DataFrame()
+    return pd.DataFrame(parsed).drop_duplicates("date").sort_values("date")
+
+
 def _naver_flows(ticker: str, pages: int = 3) -> pd.DataFrame:
     """Foreign/institutional net buying (shares) from Naver Finance — keyless and
-    reliable (pykrx's KRX-MDC path returns empty against current KRX). Returns
+    reliable (mobile JSON primary with frgn.naver HTML fallback). Returns
     columns: date, foreign_net, inst_net."""
     import io
+    import time
 
     import httpx
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    mobile = _naver_mobile_flows(ticker, pages=pages)
+    if not mobile.empty:
+        return mobile
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": f"https://finance.naver.com/item/frgn.naver?code={ticker}",
+        "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+    }
     rows = []
     with httpx.Client(timeout=settings.request_timeout, headers=headers) as client:
         for page in range(1, pages + 1):
-            try:
-                r = client.get("https://finance.naver.com/item/frgn.naver",
-                               params={"code": ticker, "page": page})
-                r.encoding = "euc-kr"
-                tables = pd.read_html(io.StringIO(r.text))
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("naver flows {} p{} failed: {}", ticker, page, exc)
-                break
+            tables = None
+            for attempt in range(2):
+                try:
+                    r = client.get("https://finance.naver.com/item/frgn.naver",
+                                   params={"code": ticker, "page": page})
+                    r.raise_for_status()
+                    r.encoding = "euc-kr"
+                    tables = pd.read_html(io.StringIO(r.text))
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 0:
+                        time.sleep(0.3)
+                        continue
+                    logger.debug("naver flows {} p{} failed: {}", ticker, page, exc)
+            if not tables:
+                continue
             tbl = next((t for t in tables if t.shape[0] >= 5 and t.shape[1] >= 8),
                        None)
             if tbl is None:
@@ -172,18 +240,41 @@ def _find(df: pd.DataFrame, needle: str) -> str | None:
     return next((c for c in df.columns if needle in str(c)), None)
 
 
+def _normalize_pykrx_flows(raw: pd.DataFrame) -> pd.DataFrame:
+    """Normalize pykrx trading-volume DataFrame into [date, foreign_net, inst_net]."""
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    df = raw.reset_index()
+    date_col = next((c for c in df.columns if "날짜" in str(c) or str(c).lower() == "date"),
+                    df.columns[0])
+    fcol = _find(df, "외국인")
+    icol = _find(df, "기관")
+    if not (fcol and icol):
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "date": pd.to_datetime(df[date_col]).dt.date.astype(str),
+        "foreign_net": pd.to_numeric(df[fcol], errors="coerce"),
+        "inst_net": pd.to_numeric(df[icol], errors="coerce"),
+    })
+    return out.dropna().drop_duplicates("date").sort_values("date")
+
+
 def investor_flows(ticker: str, start: str | None = None, end: str | None = None,
                    pages: int = 3) -> pd.DataFrame:
     """Foreign + institutional net buying (shares) per date. PRIMARY = Naver
-    (keyless); FALLBACK = pykrx (KRX account). Optional [start,end] ISO filter."""
+    (keyless JSON/HTML); FALLBACK = pykrx (KRX account). Optional [start,end]."""
+    import datetime as dt
+
     df = _naver_flows(ticker, pages=pages)
     if df.empty:   # fallback to pykrx MDC if a KRX account is configured
         stock = _stock()
-        if stock is not None and bridge_credentials() and start and end:
+        if stock is not None and bridge_credentials():
+            today = dt.date.today()
+            e_dt = (end or today.isoformat()).replace("-", "")
+            s_dt = (start or (today - dt.timedelta(days=pages * 35)).isoformat()).replace("-", "")
             try:
-                raw = stock.get_market_trading_value_by_date(start, end, ticker)
-                if raw is not None and len(raw):
-                    df = raw
+                raw = stock.get_market_trading_volume_by_date(s_dt, e_dt, ticker)
+                df = _normalize_pykrx_flows(raw)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("krx investor_flows fallback {}: {}", ticker, exc)
     if not df.empty and start and end and "date" in df.columns:

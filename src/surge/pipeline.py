@@ -18,7 +18,7 @@ from datetime import date, timedelta
 import pandas as pd
 from loguru import logger
 
-from . import scoring
+from . import reversion, scoring
 from .config import settings
 from .db import connect, ensure_securities, finish_run, start_run, upsert, utc_now
 from .features import compute_features, recent_run_pct
@@ -84,7 +84,40 @@ def _is_shortlist(feat: dict) -> bool:
     )
 
 
-def _process_batch(chunk: list[str], period: str, asof: str | None = None) -> dict:
+def _upcoming_catalyst_map(conn, ref_date: str, window_days: int = 14) -> dict[str, list[dict]]:
+    """Load non-dilution upcoming catalysts within [ref_date, ref_date + window_days]."""
+    try:
+        end_date = (date.fromisoformat(ref_date[:10]) + timedelta(days=window_days)).isoformat()
+    except ValueError:
+        return {}
+    rows = conn.execute(
+        "SELECT symbol, event_date, event_type, detail FROM catalysts "
+        "WHERE event_date >= ? AND event_date <= ? "
+        "AND LOWER(COALESCE(event_type, '')) NOT IN ('offering', 'rsplit', 'dilution')",
+        (ref_date[:10], end_date),
+    ).fetchall()
+    by_sym: dict[str, list[dict]] = {}
+    for r in rows:
+        by_sym.setdefault(r["symbol"], []).append(dict(r))
+    return by_sym
+
+
+def _is_pre_ignition(feat: dict, has_catalyst: bool = False) -> bool:
+    """Gate quiet pre-catalyst accumulation / volatility compression into Stage-2."""
+    pct = feat.get("pct_change") or 0
+    rvol = feat.get("rvol") or 0
+    rp = feat.get("range_pct")
+    quiet_coil = 1.5 <= rvol < 3.0 and abs(pct) < 15 and rp is not None and 0 < rp <= 5.0
+    cat_coil = has_catalyst and abs(pct) < 20 and rvol >= 1.2
+    return quiet_coil or cat_coil
+
+
+def _process_batch(
+    chunk: list[str],
+    period: str,
+    asof: str | None = None,
+    upcoming_cats: dict[str, list[dict]] | None = None,
+) -> dict:
     """Download + feature one batch and capture Stage-2 data for its shortlist.
     `asof` (ISO date) drops bars after that day — point-in-time replay with no
     look-ahead. Returns a dict of row-lists for atomic persistence by the caller."""
@@ -146,8 +179,10 @@ def _process_batch(chunk: list[str], period: str, asof: str | None = None) -> di
             "notes": None,
         }
 
-        if settings.min_price <= feat["close"] <= settings.max_price and _is_shortlist(
-            feat
+        sym_row = row["symbol"]
+        has_cat = bool((upcoming_cats or {}).get(sym_row))
+        if settings.min_price <= feat["close"] <= settings.max_price and (
+            _is_shortlist(feat) or _is_pre_ignition(feat, has_catalyst=has_cat)
         ):
             shortlist.append(row)
 
@@ -182,12 +217,27 @@ def _process_batch(chunk: list[str], period: str, asof: str | None = None) -> di
                 }
             )
 
-        score, reasons = scoring.setup_score(row, trap)
-        if score >= settings.min_candidate_score:
+        pct_val = row.get("pct_change") or 0
+        all_cats = (
+            list((upcoming_cats or {}).get(sym, []))
+            + corp.get("catalysts", [])
+            + sec_info.get("catalysts", [])
+        )
+        if pct_val >= settings.near_surge_pct:
+            strategy_type = "reversion_fade"
+            score, reasons = reversion.reversion_score(row, trap)
+            min_gate = settings.min_reversion_score
+        else:
+            strategy_type = "pre_catalyst"
+            score, reasons = scoring.setup_score(row, trap, catalysts=all_cats)
+            min_gate = settings.min_candidate_score
+
+        if score >= min_gate:
             out["candidate_rows"].append(
                 {
                     "symbol": sym,
                     "snapshot_date": row["snapshot_date"],
+                    "strategy_type": strategy_type,
                     "score": score,
                     "reasons": json.dumps(reasons, ensure_ascii=False),
                     "pct_change": row.get("pct_change"),
@@ -215,10 +265,12 @@ def run_snapshot(
     day with no look-ahead. Returns a summary."""
     today = date.today().isoformat()
 
+    ref_day = asof or today
     with connect() as conn:
         universe_syms = symbols or _eligible_symbols(conn, price_filter=fast)
         if limit:
             universe_syms = universe_syms[:limit]
+        upcoming_cats = _upcoming_catalyst_map(conn, ref_day)
         run_id = start_run(conn, "snapshot", today)  # durable run-start
 
     if not universe_syms:
@@ -236,7 +288,7 @@ def run_snapshot(
 
     for i, chunk in enumerate(batches, 1):
         try:
-            res = _process_batch(chunk, period, asof=asof)
+            res = _process_batch(chunk, period, asof=asof, upcoming_cats=upcoming_cats)
         except Exception as exc:  # noqa: BLE001  (one bad batch must not kill the run)
             logger.warning("batch {}/{} failed: {}", i, n_batches, exc)
             totals["batches_failed"] += 1

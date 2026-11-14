@@ -124,12 +124,18 @@ def quant_analytics() -> dict:
 @app.get("/api/watchlist")
 def watchlist(limit: int = 25) -> list[dict]:
     with connect() as conn:
-        latest = conn.execute("SELECT MAX(snapshot_date) d FROM candidates").fetchone()["d"]
+        latest = conn.execute(
+            "SELECT MAX(snapshot_date) d FROM candidates "
+            "WHERE COALESCE(strategy_type, 'legacy_chase') != 'legacy_chase'"
+        ).fetchone()["d"]
         if not latest:
             return []
         rows = conn.execute(
-            "SELECT symbol, score, close, pct_change, shares_float, rvol "
-            "FROM candidates WHERE snapshot_date=? ORDER BY score DESC LIMIT ?",
+            "SELECT symbol, COALESCE(strategy_type, 'pre_catalyst') AS strategy_type, "
+            "score, close, pct_change, shares_float, rvol "
+            "FROM candidates "
+            "WHERE snapshot_date=? AND COALESCE(strategy_type, 'legacy_chase') != 'legacy_chase' "
+            "ORDER BY score DESC LIMIT ?",
             (latest, limit),
         ).fetchall()
     res = [dict(r) for r in rows]
@@ -313,6 +319,7 @@ def learning_log(limit: int = 14) -> dict:
                 "pruned_variants": p.get("pruned_variants") or [],
                 "changes": p.get("changes") or [],
                 "promote_ready": p.get("promote_ready") or [],
+                "variant_action": p.get("variant_action"),
                 "stale_inputs": p.get("stale_inputs") or [],
                 "evidence": ev,                       # per-strategy evidence_pct snapshot
                 "warnings": p.get("warnings") or [],
@@ -544,6 +551,14 @@ def reset_killswitch() -> dict:
     return {"reset": True}
 
 
+@app.post("/api/portfolio/reset", dependencies=[Depends(require_control_auth)])
+def reset_portfolio() -> dict:
+    mode = _mode()
+    if mode != TradingMode.PAPER:
+        raise HTTPException(409, "reset only permitted in PAPER mode")
+    return store.reset_paper_account(mode)
+
+
 @app.post("/api/approvals/{order_id}", dependencies=[Depends(require_control_auth)])
 def decide_approval(order_id: str, action: str) -> dict:
     if action not in ("approve", "reject"):
@@ -563,18 +578,27 @@ def decide_approval(order_id: str, action: str) -> dict:
     
     if action == "approve":
         try:
+            from ..trading.audit import audit
             from ..trading.brokers import make_broker
+            from ..trading.models import TradingMode
+
             order = store.get_order(order_id)
             if order:
                 broker = make_broker()
                 if hasattr(broker, "submit_approved"):
                     resp = broker.submit_approved(order)
                     store.update_order_status(order_id, "submitted", broker_order_id=resp.get("id"))
+                    audit("operator", "live_order_submitted", symbol=order.symbol,
+                          payload={"order_id": order_id, "broker_order_id": resp.get("id")})
+                elif order.mode == TradingMode.LIVE:
+                    raise RuntimeError(
+                        "live order requires a live broker (set SURGE_BROKER=alpaca with API keys)"
+                    )
                 else:
                     store.update_order_status(order_id, "submitted")
         except Exception as e:
             store.set_approval(order_id, "failed", note=str(e))
-            store.update_order_status(order_id, "error")
+            store.update_order_status(order_id, "rejected")
             return {"order_id": order_id, "action": action, "error": str(e)}
     else:
         store.update_order_status(order_id, "cancelled")

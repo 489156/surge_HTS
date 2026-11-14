@@ -169,6 +169,91 @@ def insert_fill(f: Fill) -> None:
         )
 
 
+def apply_fill_atomic(mode: TradingMode, f: Fill) -> bool:
+    """Atomically apply a fill across positions, fills, and account_history in
+    a single transaction (prevents concurrent double-sell / stale-cash races).
+    Returns True if applied, False if skipped (e.g. sell with no open position)."""
+    from .models import Side
+
+    now = _now()
+    with connect() as conn:
+        if not settings.pg_dsn and not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        pos_row = conn.execute(
+            "SELECT * FROM positions WHERE symbol=? AND mode=? AND status='open'",
+            (f.symbol, mode.value),
+        ).fetchone()
+        cash_row = conn.execute(
+            "SELECT cash FROM account_history WHERE mode=? ORDER BY id DESC LIMIT 1",
+            (mode.value,),
+        ).fetchone()
+        cash = float(cash_row["cash"]) if cash_row else settings.starting_capital
+
+        if f.side == Side.BUY:
+            cash -= f.qty * f.price + f.commission
+            if pos_row:
+                old_qty = float(pos_row["qty"])
+                old_avg = float(pos_row["avg_price"])
+                new_qty = old_qty + f.qty
+                avg_price = (old_qty * old_avg + f.qty * f.price) / new_qty
+                stop_price = pos_row["stop_price"]
+                target_price = pos_row["target_price"]
+                realized = float(pos_row["realized_pnl"] or 0.0)
+            else:
+                new_qty, avg_price = f.qty, f.price
+                stop_price, target_price = None, None
+                prev = conn.execute(
+                    "SELECT realized_pnl FROM positions WHERE symbol=? AND mode=?",
+                    (f.symbol, mode.value),
+                ).fetchone()
+                realized = float(prev["realized_pnl"] or 0.0) if prev else 0.0
+            status = "open"
+        else:
+            if not pos_row or float(pos_row["qty"]) <= 1e-9:
+                return False
+            old_qty = float(pos_row["qty"])
+            old_avg = float(pos_row["avg_price"])
+            sold = min(f.qty, old_qty)
+            realized = float(pos_row["realized_pnl"] or 0.0) + (f.price - old_avg) * sold
+            new_qty = old_qty - sold
+            cash += sold * f.price - f.commission
+            stop_price = pos_row["stop_price"]
+            target_price = pos_row["target_price"]
+            avg_price = old_avg
+            status = "closed" if new_qty <= 1e-9 else "open"
+            if status == "closed":
+                new_qty = 0.0
+
+        conn.execute(
+            "INSERT INTO positions (symbol, mode, qty, avg_price, stop_price, "
+            "target_price, opened_at, updated_at, realized_pnl, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(symbol, mode) DO UPDATE SET qty=excluded.qty, "
+            "avg_price=excluded.avg_price, stop_price=excluded.stop_price, "
+            "target_price=excluded.target_price, updated_at=excluded.updated_at, "
+            "realized_pnl=excluded.realized_pnl, status=excluded.status",
+            (f.symbol, mode.value, new_qty, avg_price, stop_price,
+             target_price, now, now, realized, status),
+        )
+        conn.execute(
+            "INSERT INTO fills (fill_id, order_id, ts, symbol, side, qty, price, "
+            "commission, slippage) VALUES (?,?,?,?,?,?,?,?,?)",
+            (f.fill_id, f.order_id, f.ts, f.symbol, f.side.value, f.qty, f.price,
+             f.commission, f.slippage),
+        )
+        open_rows = conn.execute(
+            "SELECT qty, avg_price FROM positions WHERE mode=? AND status='open'",
+            (mode.value,),
+        ).fetchall()
+        equity = cash + sum(float(r["qty"]) * float(r["avg_price"]) for r in open_rows)
+        conn.execute(
+            "INSERT INTO account_history (ts, mode, cash, equity, realized_pnl, "
+            "unrealized_pnl) VALUES (?,?,?,?,?,?)",
+            (now, mode.value, cash, equity, 0.0, 0.0),
+        )
+    return True
+
+
 # ── Live-order approval queue ────────────────────────────────────────────────
 def create_approval(order_id: str) -> None:
     with connect() as conn:
@@ -236,3 +321,45 @@ def insert_risk_state(mode: TradingMode, *, daily, weekly, monthly, gross_exposu
             (_now(), mode.value, daily, weekly, monthly, gross_exposure,
              n_positions, 1 if kill_switch else 0, status),
         )
+
+
+def reset_paper_account(
+    mode: TradingMode = TradingMode.PAPER, operator: str = "operator"
+) -> dict:
+    """Reset a polluted PAPER account cleanly back to starting_capital."""
+    if mode != TradingMode.PAPER:
+        raise ValueError("paper account reset only permitted in PAPER mode")
+
+    from .audit import audit
+    from .killswitch import reset as reset_killswitch
+
+    now = _now()
+    cap = float(settings.starting_capital)
+    with connect() as conn:
+        cur_ord = conn.execute(
+            "UPDATE orders SET status='cancelled', updated_at=? "
+            "WHERE mode=? AND status NOT IN ('filled', 'cancelled', 'rejected', 'expired')",
+            (now, mode.value),
+        )
+        cancelled = cur_ord.rowcount or 0
+        conn.execute("DELETE FROM positions WHERE mode=?", (mode.value,))
+        conn.execute("DELETE FROM account_history WHERE mode=?", (mode.value,))
+        conn.execute("DELETE FROM risk_state WHERE mode=?", (mode.value,))
+        conn.execute(
+            "INSERT INTO account_history (ts, mode, cash, equity, realized_pnl, "
+            "unrealized_pnl) VALUES (?,?,?,?,?,?)",
+            (now, mode.value, cap, cap, 0.0, 0.0),
+        )
+
+    reset_killswitch(mode, operator=operator)
+    audit(
+        "operator",
+        "paper_account_reset",
+        payload={"starting_capital": cap, "cancelled_orders": cancelled, "by": operator},
+    )
+    return {
+        "reset": True,
+        "mode": mode.value,
+        "starting_capital": cap,
+        "cancelled_orders": cancelled,
+    }

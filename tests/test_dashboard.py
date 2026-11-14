@@ -192,3 +192,58 @@ def test_watchlist_live_price_field(client, monkeypatch):
     assert test_cand["close"] == 10.0
     assert test_cand["live_price"] == 12.5
 
+
+def test_dashboard_html_no_hardcoded_stale_banner_or_100x_scaling(client):
+    html = client.get("/").text
+    assert "SOXL 매수 (확신 85%)" not in html
+    assert "Risk-On" not in html
+    assert "qa.max_drawdown * 100" not in html
+    assert "qa.cvar_95 * 100" not in html
+    assert "qa.win_rate * 100" not in html
+    assert "switchTab('all', this)" in html
+
+
+def test_live_approval_rejects_paper_broker_fake_submit(client):
+    from surge.trading import store
+    from surge.trading.models import Order, OrderStatus, OrderType, Side, TradingMode
+
+    order = Order(
+        order_id="ord_live_1", mode=TradingMode.LIVE, symbol="ABC",
+        side=Side.BUY, qty=10, order_type=OrderType.MARKET,
+        status=OrderStatus.PENDING_APPROVAL,
+    )
+    store.insert_order(order)
+    store.create_approval("ord_live_1")
+
+    r = client.post("/api/approvals/ord_live_1?action=approve")
+    assert r.status_code == 200
+    body = r.json()
+    assert "error" in body
+    assert store.get_order("ord_live_1").status == OrderStatus.REJECTED
+
+
+def test_watchlist_excludes_legacy_and_portfolio_reset_endpoint(client, monkeypatch):
+    from surge.db import connect, ensure_securities, upsert as db_upsert
+    from surge.trading.models import Position
+
+    with connect() as conn:
+        ensure_securities(conn, {"LEG", "COIL"})
+        db_upsert(conn, "candidates", [
+            {"symbol": "LEG", "snapshot_date": "2026-06-12", "strategy_type": "legacy_chase",
+             "score": 9.0, "close": 1.0, "captured_at": "x"},
+            {"symbol": "COIL", "snapshot_date": "2026-06-12", "strategy_type": "pre_catalyst",
+             "score": 5.5, "close": 4.2, "captured_at": "x"},
+        ])
+    wl = client.get("/api/watchlist").json()
+    assert [r["symbol"] for r in wl] == ["COIL"]
+    assert wl[0]["strategy_type"] == "pre_catalyst"
+
+    store.save_account(TradingMode.PAPER, cash=40_000.0, equity=40_000.0)
+    store.upsert_position(Position(symbol="COIL", mode=TradingMode.PAPER, qty=100, avg_price=4.0))
+    rr = client.post("/api/portfolio/reset")
+    assert rr.status_code == 200 and rr.json()["reset"] is True
+    assert store.latest_equity(TradingMode.PAPER) == settings.starting_capital
+
+    monkeypatch.setattr(settings, "trading_mode", "live")
+    assert client.post("/api/portfolio/reset").status_code == 409
+

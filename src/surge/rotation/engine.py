@@ -58,16 +58,33 @@ def all_variants() -> dict[str, dict[str, float]]:
     return {**VARIANTS, **learn.discovered_rotation_variants()}
 
 
-def _variant_score(comps: dict[str, float], mult: dict[str, float]) -> float:
+def _variant_score(comps: dict[str, float | None], mult: dict[str, float]) -> float:
     num = den = 0.0
     default = mult.get("*", 1.0)
     for name, w in WEIGHTS.items():
+        val = comps.get(name)
+        if val is None:
+            continue
         m = mult.get(name, default)
         if m == 0:
             continue
-        num += comps[name] * w * m
+        num += val * w * m
         den += w * abs(m)
     return num / den if den else 0.0
+
+
+def active_multipliers() -> dict[str, float]:
+    """Read promoted KR rotation multipliers from model_state ({} = champion)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM model_state WHERE key='rotation_active_multipliers'"
+        ).fetchone()
+    if not row or not row["value"]:
+        return {}
+    try:
+        return json.loads(row["value"])
+    except (ValueError, TypeError):
+        return {}
 
 
 def _features(ticker: str) -> dict | None:
@@ -84,12 +101,15 @@ def _features(ticker: str) -> dict | None:
     rvol = float(vol.iloc[-1] / avg20) if avg20 else 0.0
     mom5 = float(close.iloc[-1] / close.iloc[-6] - 1) if len(close) > 6 else 0.0
 
-    sm = 0.0
-    flows = krx.investor_flows(ticker, pages=2)
-    if not flows.empty and len(flows) >= 20:
+    # Explicit start/end so pykrx fallback triggers cleanly when Naver throttles.
+    # None when flows unavailable (never masquerade missing flow as 0.0).
+    sm: float | None = None
+    flows = krx.investor_flows(ticker, start=start, end=end.isoformat(), pages=2)
+    if not flows.empty and len(flows) >= 10:
         net = (flows["foreign_net"] + flows["inst_net"]).astype(float)
-        d20 = net.tail(20).mean()
-        sm = float(net.tail(5).sum() / (abs(d20) * 5)) if d20 else 0.0
+        tail = net.tail(20).abs()
+        scale = float(tail.median()) or float(tail.mean())
+        sm = float(net.tail(5).sum() / (scale * 5)) if scale > 0 else 0.0
 
     return {"ticker": ticker, "date": str(px["date"].iloc[-1]),
             "close": float(close.iloc[-1]), "rvol": rvol, "momentum": mom5,
@@ -148,16 +168,16 @@ def screen(universe: list[str] | None = None) -> list[dict]:
         return []
 
     chain_pos = _chain_position(idx, feats)
-    # cross-sectional percentile gates (the Failure Filter)
-    pr_sm = _pct_rank({t: f["smart_money"] for t, f in feats.items()})
-    pr_rv = _pct_rank({t: f["rvol"] for t, f in feats.items()})
+    mult = active_multipliers()
 
     cands = []
     for t, f in feats.items():
         cp = chain_pos.get(t, {"chain_pos": 0.0, "back_steps": None,
                                "node": idx[t]["node"]})
-        comps = {
-            "smart_money": min(1.0, max(-1.0, f["smart_money"] / 3)),
+        sm_raw = f["smart_money"]
+        comps: dict[str, float | None] = {
+            "smart_money": (min(1.0, max(-1.0, sm_raw / 3))
+                            if sm_raw is not None else None),
             "chain_pos": cp["chain_pos"],
             "rvol": min(1.0, (f["rvol"] - 1) / 2),     # rvol 3 → 1.0
             "momentum": min(1.0, max(-1.0, f["momentum"] / 0.15)),
@@ -165,22 +185,37 @@ def screen(universe: list[str] | None = None) -> list[dict]:
         # exhaustion guard: a name already up huge is late, not early
         if f["momentum"] >= 0.25:
             comps["momentum"] = -0.5
-        score = sum(comps[k] * w for k, w in WEIGHTS.items())
-        passed = (pr_sm.get(t, 0) >= 0.70 and pr_rv.get(t, 0) >= 0.80
-                  and cp["chain_pos"] >= 0.7 and f["momentum"] < 0.25)
+        score = _variant_score(comps, mult)
+        sm_txt = (f"smart_money {sm_raw:+.1f}x(5d/20d)"
+                  if sm_raw is not None else "smart_money N/A(renorm)")
         reasons = [
-            f"smart_money {f['smart_money']:+.1f}σ(5d/20d)",
+            sm_txt,
             f"chain {idx[t]['chain']}:{cp['node']} back{cp['back_steps']}",
             f"RVOL {f['rvol']:.1f}x", f"mom5 {f['momentum']*100:+.0f}%",
         ]
         cands.append({
             "ticker": t, "name": idx[t]["name"], "chain": idx[t]["chain"],
             "node": cp["node"], "back_steps": cp["back_steps"],
-            "score": round(score, 3), "passed": passed, "ref_close": f["close"],
+            "score": round(score, 3), "passed": False, "ref_close": f["close"],
             "date": f["date"], "components": comps, "reasons": reasons,
-            **{k: round(f[k], 3) for k in ("smart_money", "rvol", "momentum")},
+            "smart_money": round(sm_raw, 3) if sm_raw is not None else None,
+            "rvol": round(f["rvol"], 3),
+            "momentum": round(f["momentum"], 3),
             "chain_pos": cp["chain_pos"],
         })
+
+    # Continuous ranked gate (replaces the brittle 0.7%-pass 4-way AND-gate):
+    # non-exhausted back-nodes in the top 30% composite score rank.
+    eligible = {c["ticker"]: c["score"] for c in cands
+                if c["chain_pos"] >= 0.5 and c["momentum"] < 0.25}
+    pr_score = _pct_rank(eligible)
+    for c in cands:
+        t = c["ticker"]
+        c["passed"] = (
+            t in eligible
+            and c["score"] >= 0.35
+            and (pr_score.get(t, 0.0) >= 0.70 or len(cands) < 5)
+        )
     cands.sort(key=lambda c: (c["passed"], c["score"]), reverse=True)
     return cands
 

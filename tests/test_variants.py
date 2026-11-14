@@ -116,3 +116,96 @@ def test_backfill_from_components(db):
             "SELECT COUNT(*) n FROM duel_variants WHERE correct IS NOT NULL"
         ).fetchone()["n"]
     assert scored == len(V.VARIANTS)   # every variant scored against label +1.5%
+
+
+def test_set_active_discovered_and_auto_manage_promote_rollback(db, monkeypatch):
+    import json as _json
+    from datetime import date, timedelta
+
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO model_state (key, value, updated_at) VALUES "
+            "('discovered_variants', ?, 'x') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_json.dumps({"disc_test1": {"*": 1.0, "asia": 2.0}}),),
+        )
+    # 1. set_active now permits discovered variants
+    V.set_active("disc_test1")
+    assert V.active_variant_name() == "disc_test1"
+
+    # 2. Trailing window lag vs champion triggers automatic rollback
+    monkeypatch.setattr(settings, "variant_rollback_window", 10)
+    monkeypatch.setattr(settings, "variant_rollback_margin", 0.05)
+    start = date(2026, 6, 1)
+    rows = []
+    for i in range(12):
+        d = (start + timedelta(days=i)).isoformat()
+        rows.append({
+            "pair": "soxl_soxs", "decision_date": d, "variant": "champion",
+            "side": "SOXL", "score": 0.5, "label": 0.02, "correct": 1,
+            "captured_at": "x", "evaluated_at": "x",
+        })
+        rows.append({
+            "pair": "soxl_soxs", "decision_date": d, "variant": "disc_test1",
+            "side": "SOXS", "score": -0.5, "label": 0.02, "correct": 0,
+            "captured_at": "x", "evaluated_at": "x",
+        })
+    from surge.db import upsert as db_upsert
+    with connect(db) as conn:
+        db_upsert(conn, "duel_variants", rows)
+
+    rb = V.auto_manage()
+    assert rb["action"] == "rollback"
+    assert rb["to"] == "champion"
+    assert V.active_variant_name() == "champion"
+
+    # 3. Clear and seed winning challenger over baseline -> auto-promote when n >= floor
+    monkeypatch.setattr(settings, "variant_auto_promote", True)
+    monkeypatch.setattr(settings, "variant_auto_min_n", 40)
+    monkeypatch.setattr(settings, "variant_min_n", 40)
+    with connect(db) as conn:
+        conn.execute("DELETE FROM duel_variants")
+        win_rows = []
+        for i in range(45):
+            d = (start + timedelta(days=i)).isoformat()
+            lab = 0.02 if i % 2 == 0 else -0.02
+            win_rows.append({
+                "pair": "soxl_soxs", "decision_date": d, "variant": "champion",
+                "side": "SOXL", "score": 0.2, "label": lab,
+                "correct": 1 if lab > 0 else 0,
+                "captured_at": "x", "evaluated_at": "x",
+            })
+            win_rows.append({
+                "pair": "soxl_soxs", "decision_date": d, "variant": "disc_test1",
+                "side": "SOXL" if lab > 0 else "SOXS",
+                "score": 0.5 if lab > 0 else -0.5, "label": lab, "correct": 1,
+                "captured_at": "x", "evaluated_at": "x",
+            })
+        db_upsert(conn, "duel_variants", win_rows)
+
+    pr = V.auto_manage(min_n=40)
+    assert pr["action"] == "promote"
+    assert pr["to"] == "disc_test1"
+    assert V.active_variant_name() == "disc_test1"
+
+    # 4. Append 10 trailing losses so cumulative record still wins, but trailing lags:
+    # must rollback to champion and NOT ping-pong re-promote on next call.
+    with connect(db) as conn:
+        trail = []
+        for i in range(45, 55):
+            d = (start + timedelta(days=i)).isoformat()
+            trail.append({
+                "pair": "soxl_soxs", "decision_date": d, "variant": "champion",
+                "side": "SOXL", "score": 0.2, "label": 0.02, "correct": 1,
+                "captured_at": "x", "evaluated_at": "x",
+            })
+            trail.append({
+                "pair": "soxl_soxs", "decision_date": d, "variant": "disc_test1",
+                "side": "SOXS", "score": -0.2, "label": 0.02, "correct": 0,
+                "captured_at": "x", "evaluated_at": "x",
+            })
+        db_upsert(conn, "duel_variants", trail)
+
+    rb2 = V.auto_manage(min_n=40)
+    assert rb2["action"] == "rollback" and rb2["to"] == "champion"
+    noop = V.auto_manage(min_n=40)
+    assert noop["action"] == "noop" and V.active_variant_name() == "champion"

@@ -61,6 +61,37 @@ def simulate_bracket(o: float, h: float, lo: float, c: float,
     return c * (1 - slip), "close"
 
 
+def simulate_bracket_intraday(bars: list[tuple[float, float, float, float]],
+                              stop: float, target: float, slip_bps: float = 20.0,
+                              ratchet_trigger: float | None = None,
+                              ratchet_price: float | None = None,
+                              ) -> tuple[float, str]:
+    """Chronological intraday bracket fill over sorted (o, h, lo, c) bars.
+    Removes daily high-vs-low ordering ambiguity when evaluating recent calls."""
+    slip = slip_bps / 1e4
+    o0 = float(bars[0][0])
+    if o0 <= stop:
+        return o0 * (1 - slip), "stop"
+
+    effective_stop = stop
+    ratchet_active = False
+    be_px = ratchet_price if ratchet_price is not None else o0
+
+    for _bo, bh, blo, _bc in bars:
+        # Check stop BEFORE updating ratchet from this bar's high (worst-case within-bar)
+        if blo <= effective_stop:
+            reason = "ratchet_stop" if ratchet_active and effective_stop > stop else "stop"
+            return effective_stop * (1 - slip), reason
+        if bh >= target:
+            return target * (1 - slip), "target"
+        if ratchet_trigger is not None and bh >= ratchet_trigger:
+            if be_px > effective_stop:
+                effective_stop = be_px
+                ratchet_active = True
+
+    return float(bars[-1][3]) * (1 - slip), "close"
+
+
 def _collect_days(prep: dict, pair: dict) -> list[dict]:
     """Chronological day records (ctx + label + same-day gap + entry refs) —
     the shared replay substrate for run() and race()."""

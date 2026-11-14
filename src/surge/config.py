@@ -47,8 +47,10 @@ class Settings(BaseSettings):
     exhausted_lookback_days: int = 10
     exhausted_run_pct: float = 300.0
 
-    # Watchlist
+    # Watchlist & signals
     min_candidate_score: float = 1.0       # minimum setup score to be a candidate
+    min_reversion_score: float = 2.0       # minimum score for overheated fade watch
+    trading_signal_source: str = "auto"    # "auto" | "duel" | "pre_catalyst"
 
     # Ingestion
     batch_size: int = 50                   # yfinance download chunk
@@ -163,12 +165,9 @@ class Settings(BaseSettings):
     # runs `surge discipline --assess` (no row on file → factor 1.0).
     duel_discipline_floor: float = 0.40
     duel_discipline_min_n: int = 20        # behavioral-anchoring sample gate (phase 2)
-    # Mandatory pick — never abstain on ALL pairs; commit the single highest-
-    # conviction call each night (half size, gap-guard/crisis still respected).
-    # This OVERRIDES the "abstain is +EV" default by user policy, so every
-    # forced pick is flagged and scored SEPARATELY to measure the constraint's
-    # cost (surge forced-eval / the ledger's forced column).
-    duel_mandatory_pick: bool = True
+    # Mandatory pick — DISABLED by default to avoid negative-EV forced coin-flips.
+    # Forced picks historically underperform; override via SURGE_DUEL_MANDATORY_PICK=true.
+    duel_mandatory_pick: bool = False
     # Gap guard — committed cancel-at-open condition: if the underlying's open
     # gap is already ≥ z·σ20 IN the call's direction, do not enter (선반영 가설).
     # DEFAULT OFF (0): the full-archive replay REJECTED the hypothesis — trades
@@ -203,9 +202,13 @@ class Settings(BaseSettings):
     # dominate a genuinely divergent live regime (the forward record overturns
     # a wrong prior within a few dozen discordant sessions). 0 = old flat start.
     verify_prior_weight: float = 15.0
-    # Shadow-variant A/B → promotion gate (forward, leak-free)
+    # Shadow-variant A/B → guarded promotion & rollback (forward, leak-free)
     variant_min_n: int = 30                # min independent scored days to judge
     variant_promote_z: float = 1.64        # one-sided 95% proportion z vs champion
+    variant_auto_promote: bool = True      # promote disc_*/static winners after min_n
+    variant_auto_min_n: int = 150          # unattended auto-promotion sample floor
+    variant_rollback_window: int = 30      # trailing matched sessions for decay check
+    variant_rollback_margin: float = 0.05  # roll back to champion if trailing acc drops >=5%p
     # 🟢 edge → ⭐ SIGNAL graduation (conservative; ALL must hold, see verdict.py).
     # Time-to-signal is cut by trading raw sample size for STRUCTURAL robustness
     # (split-half + week-spread) AND by replacing the daily-peeked CI with an

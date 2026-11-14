@@ -94,3 +94,55 @@ def test_committee_agents_list_structure():
     assert "burry_short_agent" in names
     assert "ackman_catalyst_agent" in names
     assert "graham_value_agent" in names
+
+
+def test_orchestrator_runs_rules_after_llm_cap_and_fetches_headlines_once(tmp_path, monkeypatch):
+    from surge.config import settings
+    from surge.db import connect, ensure_securities, init_db
+    from surge.trading import llm, store
+    from surge.trading.models import TradingMode
+    from surge.trading.orchestrator import TradingEngine
+
+    db = tmp_path / "orch.db"
+    init_db(db)
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "anthropic_api_key", "k")
+
+    syms = ["C1", "C2", "C3", "TRAP4"]
+    with connect(db) as conn:
+        ensure_securities(conn, syms)
+        for idx, s in enumerate(syms):
+            conn.execute(
+                "INSERT INTO daily_snapshot (symbol, snapshot_date, close, rvol, pct_change, market_cap, shares_float, captured_at) "
+                "VALUES (?, '2026-10-10', 10.0, 5.0, 40.0, 50000000.0, 5000000.0, 'x')",
+                (s,),
+            )
+            conn.execute(
+                "INSERT INTO candidates (symbol, snapshot_date, score, close, captured_at) "
+                "VALUES (?, '2026-10-10', ?, 10.0, 'x')",
+                (s, 9.0 - idx),
+            )
+        conn.execute(
+            "INSERT INTO trap_flags (symbol, snapshot_date, pending_offering, exhausted) "
+            "VALUES ('TRAP4', '2026-10-10', 1, 1)"
+        )
+
+    store.save_account(TradingMode.PAPER, cash=100_000, equity=100_000)
+
+    headline_calls = []
+    monkeypatch.setattr(llm, "fetch_headlines", lambda s: (headline_calls.append(s) or ["h1"]))
+    monkeypatch.setattr(llm, "analyze_news", lambda s, h: None)
+    monkeypatch.setattr(
+        llm, "analyze_persona",
+        lambda s, p, ctx: {"score": 85.0, "confidence": 85.0, "reasoning": "bullish llm"},
+    )
+
+    eng = TradingEngine(TradingMode.PAPER, price_fn=lambda s: 10.0)
+    res = eng.run_cycle(symbols=syms)
+    # 1 headline fetch per LLM-evaluated candidate (top 3 only, never 5x per persona)
+    assert headline_calls == ["C1", "C2", "C3"]
+    c1_res = next(d for d in res["decisions"] if d["symbol"] == "C1")
+    trap_res = next(d for d in res["decisions"] if d["symbol"] == "TRAP4")
+    assert c1_res["action"] == "BUY"
+    # Candidate #4 (TRAP4) exceeds MAX_LLM_EVALS=3, yet Burry rule veto STILL forces HOLD
+    assert trap_res["action"] == "HOLD"

@@ -228,7 +228,40 @@ def _base_ctx(pair: dict, date: str) -> dict:
         "vix9d": None, "vix3m": None, "skew_level": None, "skew_chg": None,
         "tnx_chg": None, "credit_chg": None, "dollar_chg": None,
         "bonds_chg": None, "asia": {}, "futures_ret": None, "atr_pct": {},
+        "opt_pc_oi": None, "opt_pc_vol": None, "opt_atm_iv": None,
+        "opt_pc_oi_z": None,
     }
+
+
+def latest_options_context(underlying: str, before_date: str) -> dict:
+    """Leak-safe prior-session options snapshot (date < before_date) for ctx."""
+    out: dict = {}
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT atm_iv, pc_oi_ratio, pc_vol_ratio FROM options_snapshots "
+                "WHERE symbol=? AND date < ? ORDER BY date DESC LIMIT 21",
+                (underlying, before_date),
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return out
+    if not rows:
+        return out
+    cur = rows[0]
+    if cur["pc_oi_ratio"] is not None:
+        out["opt_pc_oi"] = float(cur["pc_oi_ratio"])
+    if cur["pc_vol_ratio"] is not None:
+        out["opt_pc_vol"] = float(cur["pc_vol_ratio"])
+    if cur["atm_iv"] is not None:
+        out["opt_atm_iv"] = float(cur["atm_iv"])
+    hist_oi = [float(r["pc_oi_ratio"]) for r in rows[1:] if r["pc_oi_ratio"] is not None]
+    if len(hist_oi) >= 5 and out.get("opt_pc_oi") is not None:
+        mu = sum(hist_oi) / len(hist_oi)
+        var = sum((x - mu) ** 2 for x in hist_oi) / len(hist_oi)
+        sd = var ** 0.5
+        if sd > 1e-6:
+            out["opt_pc_oi_z"] = round((out["opt_pc_oi"] - mu) / sd, 4)
+    return out
 
 
 def context_for(prepared: dict[str, pd.DataFrame], date: str,
@@ -262,6 +295,9 @@ def context_for(prepared: dict[str, pd.DataFrame], date: str,
         f = prepared.get(name)
         if f is not None and date in f.index and not pd.isna(f.loc[date, "f_level"]):
             ctx[key] = float(f.loc[date, "f_level"])
+            if ctx["vix_level"] is None and not pd.isna(f.loc[date, "f_chg"]):
+                ctx["vix_level"] = float(f.loc[date, "f_level"])
+                ctx["vix_chg"] = float(f.loc[date, "f_chg"])
     sk = prepared.get("skew")
     if sk is not None and date in sk.index and not pd.isna(sk.loc[date, "f_level"]):
         ctx["skew_level"] = float(sk.loc[date, "f_level"])
@@ -346,6 +382,11 @@ def latest_context(prepared: dict[str, pd.DataFrame], session: str,
         f = prepared.get(name)
         if f is not None and len(f) >= 1 and not pd.isna(f["close"].iloc[-1]):
             ctx[key] = float(f["close"].iloc[-1])
+            if ctx["vix_level"] is None and len(f) >= 2:
+                chg = f["close"].pct_change().iloc[-1]
+                if not pd.isna(chg):
+                    ctx["vix_level"] = float(f["close"].iloc[-1])
+                    ctx["vix_chg"] = float(chg)
     sk = prepared.get("skew")
     if sk is not None and len(sk) >= 2 and not pd.isna(sk["close"].iloc[-1]):
         ctx["skew_level"] = float(sk["close"].iloc[-1])

@@ -89,21 +89,25 @@ def _cmd_surges(args) -> int:
 def _cmd_watchlist(args) -> int:
     with connect() as conn:
         latest = conn.execute(
-            "SELECT MAX(snapshot_date) d FROM candidates"
+            "SELECT MAX(snapshot_date) d FROM candidates "
+            "WHERE COALESCE(strategy_type, 'legacy_chase') != 'legacy_chase'"
         ).fetchone()["d"]
         if not latest:
             print("(no candidates yet — run `surge snapshot` first)")
             return 0
         rows = conn.execute(
             "SELECT * FROM candidates WHERE snapshot_date = ? "
+            "AND COALESCE(strategy_type, 'legacy_chase') != 'legacy_chase' "
             "ORDER BY score DESC LIMIT ?",
             (latest, args.limit),
         ).fetchall()
     print(f"\n  Surge watchlist — {latest}  (Top {len(rows)} by setup score)\n")
     for r in rows:
         fl = f"{r['shares_float']/1e6:.1f}M" if r["shares_float"] else "—"
+        stype = r["strategy_type"] if "strategy_type" in r.keys() else "pre_catalyst"
+        tag = "fade" if stype == "reversion_fade" else "pre "
         print(
-            f"  {r['score']:>5.1f}  {r['symbol']:<7} "
+            f"  {r['score']:>5.1f}  [{tag}] {r['symbol']:<7} "
             f"${r['close']:<7.2f} float={fl:<8} "
             f"chg={r['pct_change'] or 0:+.0f}%"
         )
@@ -1212,6 +1216,16 @@ def _cmd_portfolio(args) -> int:
     from .trading.risk import RiskEngine
 
     mode = TradingMode.LIVE if args.live else TradingMode.PAPER
+    if getattr(args, "reset", False):
+        if args.live:
+            print("  [ERROR] --reset is only permitted in PAPER mode (without --live)")
+            return 1
+        res = store.reset_paper_account(TradingMode.PAPER)
+        print(
+            f"  Paper account reset: equity=${res['starting_capital']:,.0f}, "
+            f"cancelled_orders={res['cancelled_orders']}"
+        )
+        return 0
     positions = store.get_positions(mode)
     last = {p.symbol: (default_last_price(p.symbol) or p.avg_price) for p in positions}
     status, m = RiskEngine(mode).risk_state(last)
@@ -1314,6 +1328,9 @@ def _cmd_daily(_args) -> int:
     if r["promote_ready"]:
         print(f"  ✅ 승인 대기(사람 검토): {', '.join(r['promote_ready'])} "
               "— 자동 승격 안 함")
+    va = r.get("variant_action")
+    if va and va.get("action") and va.get("action") != "noop":
+        print(f"  🧬 Duel 모델 자동 관리: {va['action']} ({va.get('from')} → {va.get('to')})")
     if r.get("stale_inputs"):
         print(f"  ⏰ 스케줄 점검: {', '.join(r['stale_inputs'])} 입력이 오래됨 "
               "— 예약 실행(작업 스케줄러)이 도는지 확인 필요")
@@ -1419,6 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("portfolio", help="positions, equity, risk state")
     sp.add_argument("--live", action="store_true")
+    sp.add_argument("--reset", action="store_true", help="reset paper account to starting_capital (PAPER only)")
     sp.set_defaults(func=_cmd_portfolio)
 
     sp = sub.add_parser("approvals", help="live-order human-approval queue")

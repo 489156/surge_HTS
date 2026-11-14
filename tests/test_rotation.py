@@ -144,3 +144,45 @@ def test_variant_leaderboard_ranks_by_forward_t5(db):
     ranked = dict(lb["ranked"])
     assert ranked["chain_only"]["mean_t5"] == pytest.approx(0.15)  # picks WIN
     assert ranked["flow_heavy"]["mean_t5"] == pytest.approx(-0.05)  # picks LOSE
+
+
+def test_smart_money_none_renormalizes_and_ranked_gate(monkeypatch):
+    # 1. Missing smart_money (None) is excluded from denominator, never 0.0-penalized
+    s_none = engine._variant_score(
+        {"smart_money": None, "chain_pos": 1.0, "rvol": 0.5, "momentum": 0.5}, {}
+    )
+    s_present = engine._variant_score(
+        {"chain_pos": 1.0, "rvol": 0.5, "momentum": 0.5}, {}
+    )
+    assert s_none == pytest.approx(s_present)
+
+    # 2. Screen handles empty flow data cleanly and applies ranked gate cleanly
+    dates = pd.date_range("2026-05-01", periods=25, freq="B").strftime("%Y-%m-%d").tolist()
+    vols = [100_000] * 24 + [300_000]  # rvol = 3.0 on last bar
+
+    def fake_ohlcv(ticker, start, end):
+        # 1 lead stock (hot) vs 5 back-node stocks
+        closes = [100.0] * 19 + [100, 102, 105, 110, 118, 120] if ticker == "HOT1" else (
+            [100.0] * 24 + ([112.0] if ticker == "BACK1" else [101.0])
+        )
+        return pd.DataFrame({
+            "date": dates, "open": closes, "high": closes, "low": closes,
+            "close": closes, "volume": vols,
+        })
+
+    monkeypatch.setattr(engine.krx, "ohlcv", fake_ohlcv)
+    monkeypatch.setattr(engine.krx, "investor_flows", lambda *a, **k: pd.DataFrame())
+    fake_idx = {
+        "HOT1": {"chain": "hbm", "order": 1, "node": "lead", "name": "Hot"},
+        "BACK1": {"chain": "hbm", "order": 2, "node": "back", "name": "Back1"},
+        "BACK2": {"chain": "hbm", "order": 2, "node": "back", "name": "Back2"},
+        "BACK3": {"chain": "hbm", "order": 2, "node": "back", "name": "Back3"},
+        "BACK4": {"chain": "hbm", "order": 2, "node": "back", "name": "Back4"},
+        "BACK5": {"chain": "hbm", "order": 3, "node": "deep", "name": "Back5"},
+    }
+    monkeypatch.setattr(engine.chains, "ticker_index", lambda: fake_idx)
+    cands = engine.screen(universe=list(fake_idx))
+    by_t = {c["ticker"]: c for c in cands}
+    assert by_t["BACK1"]["smart_money"] is None
+    assert by_t["BACK1"]["passed"] is True
+    assert by_t["HOT1"]["passed"] is False

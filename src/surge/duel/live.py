@@ -18,7 +18,7 @@ from ..config import settings
 from ..db import connect, utc_now
 from ..db import upsert as db_upsert
 from . import data as ddata
-from .backtest import simulate_bracket
+from .backtest import simulate_bracket, simulate_bracket_intraday
 from .decide import DuelDecision, decide, decide_adaptive, guard_triggered
 
 ET = ZoneInfo("America/New_York")
@@ -88,6 +88,7 @@ def tonight(frames: dict | None = None, *, with_futures: bool = True,
 
     if with_futures:
         ctx["futures_ret"] = _nq_futures_ret()
+    ctx.update(ddata.latest_options_context(pair["underlying"], session))
 
     refs = _live_refs(legs)
     if not refs:  # offline fallback: yesterday's closes as planning references
@@ -269,6 +270,7 @@ def _persist(d: DuelDecision) -> None:
         "stop_price": d.stop_price,
         "target_price": d.target_price,
         "gap_guard": d.gap_guard,
+        "atr_pct": round(d.atr_pct, 6) if d.atr_pct is not None else None,
         "model": d.model,
         "forced": 1 if d.forced else 0,
         "reasons": json.dumps(d.reasons, ensure_ascii=False),
@@ -297,8 +299,8 @@ def eval_outcomes(frames: dict | None = None) -> dict:
     ).isoformat()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT pair, decision_date, side, stop_price, target_price, "
-            "gap_guard FROM duel_decisions "
+            "SELECT pair, decision_date, side, entry_ref, stop_price, target_price, "
+            "gap_guard, atr_pct FROM duel_decisions "
             "WHERE evaluated_at IS NULL AND decision_date <= ?",
             (scorable_through,),
         ).fetchall()
@@ -314,6 +316,13 @@ def eval_outcomes(frames: dict | None = None) -> dict:
         by_pair.setdefault(r["pair"] or "soxl_soxs", []).append(r)
     shared = (ddata.fetch_shared("3mo")
               if frames is None and len(by_pair) > 1 else None)
+    intraday = (
+        _intraday_session_map(
+            [r["side"] for r in pending if r["side"] not in (None, "STAND_ASIDE")],
+            [r["decision_date"] for r in pending if r["side"] not in (None, "STAND_ASIDE")],
+        )
+        if frames is None else {}
+    )
     realized: dict[tuple[str, str], float] = {}   # (pair, date) → label for variants
 
     for pid, prows in by_pair.items():
@@ -335,10 +344,20 @@ def eval_outcomes(frames: dict | None = None) -> dict:
                            pair["underlying"], len(prows))
             continue
 
+        latest_und = str(und.index.max()) if len(und.index) else ""
+        ref_df = (shared.get(ddata.MARKET_PROXY)
+                  if shared else pframes.get(ddata.MARKET_PROXY))
+        ref_idx = ref_df.index if ref_df is not None else None
         for r in prows:
             dte, side = r["decision_date"], r["side"]
-            # date absent from a HEALTHY frame = holiday/no session → finalize
             label = float(und.loc[dte, "oc_ret"]) if dte in und.index else None
+            if label is None:
+                # Defer instead of stamping evaluated_at when Yahoo lagged or
+                # peer US ETF traded on dte; finalize only confirmed holidays.
+                if dte > latest_und or (ref_idx is not None and dte in ref_idx):
+                    logger.warning("duel-eval: deferring {} {} (missing bar; latest={})",
+                                   pid, dte, latest_und or "none")
+                    continue
             if label is not None:
                 realized[(pid, dte)] = label
             updates: dict = {"evaluated_at": utc_now(), "soxx_oc_ret": label}
@@ -367,15 +386,33 @@ def eval_outcomes(frames: dict | None = None) -> dict:
                     stop = r["stop_price"] or entry * 0.97
                     target = r["target_price"] or entry * 1.05
                     r_trig, r_px = None, None
-                    if settings.duel_ratchet_atr > 0 and r.get("atr_pct"):
-                        atr_val = entry * float(r["atr_pct"])
+                    atr_pct = r.get("atr_pct")
+                    if (
+                        not atr_pct
+                        and r.get("entry_ref")
+                        and r.get("stop_price")
+                        and settings.duel_stop_atr > 0
+                    ):
+                        atr_pct = abs(float(r["entry_ref"]) - float(r["stop_price"])) / (
+                            float(r["entry_ref"]) * settings.duel_stop_atr
+                        )
+                    if settings.duel_ratchet_atr > 0 and atr_pct:
+                        atr_val = entry * float(atr_pct)
                         r_trig = entry + settings.duel_ratchet_atr * atr_val
                         r_px = entry  # break-even level
-                    exit_px, reason = simulate_bracket(
-                        entry, float(bar["high"]), float(bar["low"]),
-                        float(bar["close"]), stop, target,
-                        settings.duel_slippage_bps,
-                        ratchet_trigger=r_trig, ratchet_price=r_px)
+                    sess_bars = intraday.get((side, dte))
+                    if sess_bars and len(sess_bars) >= 4:
+                        exit_px, reason = simulate_bracket_intraday(
+                            sess_bars, stop, target, settings.duel_slippage_bps,
+                            ratchet_trigger=r_trig, ratchet_price=r_px,
+                        )
+                    else:
+                        exit_px, reason = simulate_bracket(
+                            entry, float(bar["high"]), float(bar["low"]),
+                            float(bar["close"]), stop, target,
+                            settings.duel_slippage_bps,
+                            ratchet_trigger=r_trig, ratchet_price=r_px,
+                        )
                     updates.update(
                         entry_fill=entry, exit_fill=round(exit_px, 4),
                         exit_reason=reason,
@@ -406,6 +443,47 @@ def eval_outcomes(frames: dict | None = None) -> dict:
     from . import factors
     factors.score_pending(_label)        # score shadow candidate factors forward
     return _tally()
+
+
+def _intraday_session_map(sides: list[str], dates: list[str]) -> dict[tuple[str, str], list[tuple[float, float, float, float]]]:
+    """Fetch 15m intraday bars for recent (<=55d) calls cleanly without failing."""
+    import pandas as pd
+
+    from ..sources import market
+
+    if not sides or not dates:
+        return {}
+    today = datetime.now(tz=ET).date()
+    recent = [d for d in sorted(set(dates)) if 0 <= (today - datetime.fromisoformat(d).date()).days <= 55]
+    if not recent:
+        return {}
+    end_dt = (datetime.fromisoformat(recent[-1]).date() + timedelta(days=2)).isoformat()
+    df = market.fetch_intraday(sorted(set(sides)), start=recent[0], end=end_dt, interval="15m")
+    if df.empty or "date" not in df.columns:
+        return {}
+    ts = pd.to_datetime(df["date"], errors="coerce")
+    valid = ts.notna()
+    if not valid.any():
+        return {}
+    df = df[valid].copy()
+    sub = ts[valid]
+    ts_et = sub.dt.tz_localize(ET) if sub.dt.tz is None else sub.dt.tz_convert(ET)
+    df["_d"] = ts_et.dt.date.astype(str)
+    df["_hm"] = ts_et.dt.hour * 60 + ts_et.dt.minute
+    df["_ts"] = ts_et
+    # Regular US market session 09:30 (570m) <= t < 16:00 (960m)
+    reg = (
+        df[(df["_hm"] >= 570) & (df["_hm"] < 960)]
+        .dropna(subset=["open", "high", "low", "close"])
+        .sort_values("_ts")
+    )
+    out: dict[tuple[str, str], list[tuple[float, float, float, float]]] = {}
+    for (sym, dte), g in reg.groupby(["symbol", "_d"]):
+        out[(str(sym), str(dte))] = [
+            (float(r.open), float(r.high), float(r.low), float(r.close))
+            for r in g.itertuples()
+        ]
+    return out
 
 
 def forced_tally() -> dict:
